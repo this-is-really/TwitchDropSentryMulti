@@ -26,11 +26,14 @@ pub async fn filter_streams (client: Arc<TwitchClient>, campaigns: Arc<Vec<DropC
             allow_channels.insert(campaign.id.to_string(), allow.clone());
             drop(allow_channels);
             for channel in allow {
-                if count >= MAX_TOPICS {
-                    break;
+                let stream_info = retry!(client.get_stream_info(&channel.name));
+                if stream_info.stream.is_some() {
+                    if count >= MAX_TOPICS {
+                        break;
+                    }
+                    video_vec.insert(Channel { channel_id: channel.id, channel_login: channel.name });
+                    count += 1
                 }
-                video_vec.insert(Channel { channel_id: channel.id, channel_login: channel.name });
-                count += 1
             }
         } else {
             let game_directory = retry!(client.get_game_directory(&campaign_details.game.slug, true));
@@ -39,11 +42,14 @@ pub async fn filter_streams (client: Arc<TwitchClient>, campaigns: Arc<Vec<DropC
             all_default.insert(campaign.id.to_string(), game_directory.clone());
             drop(all_default);
             for channel in game_directory {
+                let stream_info = retry!(client.get_stream_info(&channel.broadcaster.login));
                 if count >= MAX_TOPICS {
                     break;
                 }
-                video_vec.insert(Channel { channel_id: channel.broadcaster.id, channel_login: channel.broadcaster.login });
-                count += 1
+                if stream_info.stream.is_some() {
+                    video_vec.insert(Channel { channel_id: channel.broadcaster.id, channel_login: channel.broadcaster.login });
+                    count += 1
+                }
             }
         }
     }
@@ -59,18 +65,32 @@ pub async fn filter_streams (client: Arc<TwitchClient>, campaigns: Arc<Vec<DropC
             let count = lock.len();
             drop(lock);
             if count < MAX_TOPICS {
-                let mut to_add = Vec::new();
-                let mut default_channels = DEFAULT_CHANNELS.lock().await;
+                let mut to_add = HashSet::new();
                 for campaign in campaigns.iter() {
-                    let slug = retry!(client.get_slug(&campaign.game.displayName));
-                    let game_directory = retry!(client.get_game_directory(&slug, true));
-                    let game_directory: HashSet<GameDirectory> = game_directory.into_iter().collect();
-                    default_channels.insert(campaign.id.clone(), game_directory.clone());
-                    for channel in &game_directory {
-                        to_add.push(Channel { channel_id: channel.broadcaster.id.clone(), channel_login: channel.broadcaster.login.clone() });
-                        if to_add.len() + count  >= MAX_TOPICS {
-                            break;
+                    let allow_channels = ALLOW_CHANNELS.lock().await;
+                    if let Some(channels) = allow_channels.get(&campaign.id) {
+                        for channel in channels {
+                            if to_add.len() + count  >= MAX_TOPICS {
+                                break;
+                            }
+                            let stream_info = retry!(client.get_stream_info(&channel.name));
+                            if stream_info.stream.is_some() {
+                                to_add.insert(Channel { channel_id: channel.id.clone(), channel_login: channel.name.clone() });
+                            }
                         }
+                    } else {
+                        let mut default_channels = DEFAULT_CHANNELS.lock().await;
+                        let slug = retry!(client.get_slug(&campaign.game.displayName));
+                        let game_directory = retry!(client.get_game_directory(&slug, true));
+                        let game_directory: HashSet<GameDirectory> = game_directory.into_iter().collect();
+                        default_channels.insert(campaign.id.clone(), game_directory.clone());
+                        for channel in &game_directory {
+                            to_add.insert(Channel { channel_id: channel.broadcaster.id.clone(), channel_login: channel.broadcaster.login.clone() });
+                            if to_add.len() + count  >= MAX_TOPICS {
+                                break;
+                            }
+                        }
+                        drop(default_channels);
                     }
                     if to_add.len() + count >= MAX_TOPICS {
                         break;
@@ -88,7 +108,6 @@ pub async fn filter_streams (client: Arc<TwitchClient>, campaigns: Arc<Vec<DropC
                     cur += 1;
                 }
                 drop(lock);
-                drop(default_channels);
             }
             debug!("Drop ids");
             sleep(Duration::from_secs(UPDATE_TIME)).await

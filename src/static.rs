@@ -2,7 +2,7 @@ use std::{collections::{HashMap, HashSet}, sync::Arc, time::Duration};
 
 use once_cell::sync::Lazy;
 use tokio::{sync::Mutex, time::sleep};
-use twitch_gql_rs::structs::{Channels, GameDirectory};
+use twitch_gql_rs::{TwitchClient, structs::{Channels, GameDirectory}};
 
 #[derive(Default, Clone, PartialEq, Eq)]
 pub struct NowWatched {
@@ -19,7 +19,9 @@ pub struct Channel {
 
 const MAX_ATTEMPTS: u32 = 3;
 
-pub static DROP_CASH: Lazy<Arc<Mutex<HashSet<String>>>> = Lazy::new(|| Arc::new(Mutex::new(HashSet::new())));
+pub static ACCOUNTS: Lazy<Arc<Mutex<Option<Vec<Arc<TwitchClient>>>>>> = Lazy::new(|| Arc::new(Mutex::new(None)));
+
+pub static DROP_CASH: Lazy<Arc<Mutex<HashMap<String, HashSet<String>>>>> = Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
 
 pub static CHANNEL_IDS: Lazy<Arc<Mutex<HashSet<Channel>>>> = Lazy::new(|| Arc::new(Mutex::new(HashSet::new())));
 
