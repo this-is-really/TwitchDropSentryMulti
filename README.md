@@ -68,4 +68,6 @@ Please consider rating this repository by clicking the star in the top-right cor
 
 [![DonationAlerts](https://www.donationalerts.com/img/brand/donationalerts.svg)](https://www.donationalerts.com/r/this_is_really)
 
+[![DALINK](https://i.ibb.co/DgKfrkTL/og-image-1.jpg)](https://dalink.to/this_is_really)
+
 Your support will accelerate development and help ensure the long-term maintenance of this project
