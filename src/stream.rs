@@ -31,12 +31,15 @@ pub async fn filter_streams (client: Arc<TwitchClient>, campaigns: Arc<Vec<DropC
                     if count >= MAX_TOPICS {
                         break;
                     }
-                    video_vec.insert(Channel { channel_id: channel.id, channel_login: channel.name });
-                    count += 1
+                    let avaiable_drops = retry!(client.get_available_drops_for_channel(&channel.id));
+                    if avaiable_drops.viewerDropCampaigns.is_some() {
+                        video_vec.insert(Channel { channel_id: channel.id, channel_login: channel.name });
+                        count += 1
+                    }
                 }
             }
         } else {
-            let game_directory = retry!(client.get_game_directory(&campaign_details.game.slug, true));
+            let game_directory = retry!(client.get_game_directory(&campaign_details.game.slug, 30, true));
             let mut all_default = DEFAULT_CHANNELS.lock().await;
             let game_directory: HashSet<GameDirectory> = game_directory.into_iter().collect();
             all_default.insert(campaign.id.to_string(), game_directory.clone());
@@ -47,8 +50,11 @@ pub async fn filter_streams (client: Arc<TwitchClient>, campaigns: Arc<Vec<DropC
                     break;
                 }
                 if stream_info.stream.is_some() {
-                    video_vec.insert(Channel { channel_id: channel.broadcaster.id, channel_login: channel.broadcaster.login });
-                    count += 1
+                    let available_drops = retry!(client.get_available_drops_for_channel(&channel.broadcaster.id));
+                    if available_drops.viewerDropCampaigns.is_some() {
+                        video_vec.insert(Channel { channel_id: channel.broadcaster.id, channel_login: channel.broadcaster.login });
+                        count += 1
+                    }
                 }
             }
         }
@@ -75,19 +81,25 @@ pub async fn filter_streams (client: Arc<TwitchClient>, campaigns: Arc<Vec<DropC
                             }
                             let stream_info = retry!(client.get_stream_info(&channel.name));
                             if stream_info.stream.is_some() {
-                                to_add.insert(Channel { channel_id: channel.id.clone(), channel_login: channel.name.clone() });
+                                let available_drops = retry!(client.get_available_drops_for_channel(&channel.id));
+                                if available_drops.viewerDropCampaigns.is_some() {
+                                    to_add.insert(Channel { channel_id: channel.id.clone(), channel_login: channel.name.clone() });
+                                }
                             }
                         }
                     } else {
                         let mut default_channels = DEFAULT_CHANNELS.lock().await;
                         let slug = retry!(client.get_slug(&campaign.game.displayName));
-                        let game_directory = retry!(client.get_game_directory(&slug, true));
+                        let game_directory = retry!(client.get_game_directory(&slug, 30, true));
                         let game_directory: HashSet<GameDirectory> = game_directory.into_iter().collect();
                         default_channels.insert(campaign.id.clone(), game_directory.clone());
                         for channel in &game_directory {
-                            to_add.insert(Channel { channel_id: channel.broadcaster.id.clone(), channel_login: channel.broadcaster.login.clone() });
-                            if to_add.len() + count  >= MAX_TOPICS {
-                                break;
+                            let available_drops = retry!(client.get_available_drops_for_channel(&channel.broadcaster.id));
+                            if available_drops.viewerDropCampaigns.is_some() {
+                                to_add.insert(Channel { channel_id: channel.broadcaster.id.clone(), channel_login: channel.broadcaster.login.clone() });
+                                if to_add.len() + count  >= MAX_TOPICS {
+                                    break;
+                                }
                             }
                         }
                         drop(default_channels);

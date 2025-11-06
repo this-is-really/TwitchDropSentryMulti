@@ -4,13 +4,6 @@ use once_cell::sync::Lazy;
 use tokio::{sync::Mutex, time::sleep};
 use twitch_gql_rs::{TwitchClient, structs::{Channels, GameDirectory}};
 
-#[derive(Default, Clone, PartialEq, Eq)]
-pub struct NowWatched {
-    pub channel_login: String,
-    pub channel_id: String,
-    pub stream_id: String,
-}
-
 #[derive(Default, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Channel {
     pub channel_id: String,

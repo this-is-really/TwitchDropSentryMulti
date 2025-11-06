@@ -5,7 +5,7 @@ use tokio::{fs::{self}, sync::{Notify, broadcast::{self, Receiver, error::TryRec
 use tracing::{info};
 use tracing_appender::rolling;
 use tracing_subscriber::fmt::writer::BoxMakeWriter;
-use twitch_gql_rs::{TwitchClient, client_type::ClientType, structs::{DropCampaigns}};
+use twitch_gql_rs::{TwitchClient, client_type::ClientType, error::ClaimDropError, structs::DropCampaigns};
 
 use crate::{r#static::{ACCOUNTS, Channel, DROP_CASH, retry_backup}, stream::{filter_streams, update_stream}};
 mod r#static;
@@ -82,6 +82,9 @@ async fn main () -> Result<(), Box<dyn Error>> {
                 let mut grouped: BTreeMap<usize, Vec<DropCampaigns>> = BTreeMap::new();
                 let mut next_index: usize = 0;
                 for obj in campaign {
+                    if obj.status == "EXPIRED" {
+                        continue;
+                    }
                     let idx = *id_to_index.entry(obj.game.id.clone()).or_insert_with(|| {
                         let i = next_index;
                         next_index += 1;
@@ -134,10 +137,6 @@ async fn main_logic (client: Arc<TwitchClient> ,grouped: BTreeMap<usize, Vec<Dro
         info!("Stream priority updated");
 
         for campaign in current_campaigns {
-            if campaign.status == "EXPIRED" {
-                tracing::error!("Drop is EXPIRED");
-                break;
-            }
 
             let mut campaign_details = client.get_campaign_details(&campaign.id).await?;
 
@@ -247,6 +246,7 @@ async fn drop_sync (clients: Vec<Arc<TwitchClient>>, tx: Sender<String>, cash_pa
             let bar = bars.add(ProgressBar::new(1));
             bar.set_style(ProgressStyle::with_template("[{bar:40.cyan/blue}] {percent:.1}% ({pos}/{len} min) {msg}").unwrap());
             bar.set_message("Initialization...");
+            bar.enable_steady_tick(Duration::from_millis(500));
 
             let tolerance = Duration::from_secs(5 * 60);
 
@@ -305,17 +305,9 @@ async fn drop_sync (clients: Vec<Arc<TwitchClient>>, tx: Sender<String>, cash_pa
                     old_drop = drop_progress.dropID.to_string()
                 }
 
-                if bar.length().unwrap_or(0) == 1 {
-                    bar.set_length(drop_progress.requiredMinutesWatched);
-                    bar.set_message(format!("User: {}", client.login.clone().unwrap()));
-                    need_update = true
-                }
-
-                if need_update || drop_progress.currentMinutesWatched != bar.position() {
-                    bar.set_length(drop_progress.requiredMinutesWatched);
-                    bar.set_position(drop_progress.currentMinutesWatched);
-                    bar.tick();
-                }
+                bar.set_length(drop_progress.requiredMinutesWatched);
+                bar.set_message(format!("User: {}", client.login.clone().unwrap()));
+                bar.set_position(drop_progress.currentMinutesWatched);
 
                 if end_time <= Instant::now() + tolerance || Instant::now() <= end_time + tolerance && need_update  {
                     let reaming = drop_progress.requiredMinutesWatched.saturating_sub(drop_progress.currentMinutesWatched);
@@ -338,7 +330,7 @@ async fn claim_drop (client: &Arc<TwitchClient>, drop_progress_id: &str) -> Resu
                     if let Some(id) = time_based.self_drop.dropInstanceID {
                         match client.claim_drop(&id).await {
                             Ok(_) => return Ok(()),
-                            Err(twitch_gql_rs::error::TwitchError::DropAlreadyClaimed) => return Ok(()),
+                            Err(ClaimDropError::DropAlreadyClaimed) => return Ok(()),
                             Err(e) => return Err(e)?
                         }
                     }
