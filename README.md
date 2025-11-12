@@ -18,6 +18,8 @@
 
 -----
 
+[![Discord](https://img.shields.io/discord/1437005378750775359?style=for-the-badge&logo=discord)](https://discord.gg/7H7n4RPtJG)
+
 ## What is this?
 
 This is a **forked command-line tool** designed to automatically watch Twitch streams and claim Time-Based Drops for a selected game, with a **primary focus on managing multiple Twitch accounts concurrently**.
@@ -68,6 +70,6 @@ Please consider rating this repository by clicking the star in the top-right cor
 
 [![DonationAlerts](https://www.donationalerts.com/img/brand/donationalerts.svg)](https://www.donationalerts.com/r/this_is_really)
 
-[![DALINK](https://i.ibb.co/DgKfrkTL/og-image-1.jpg)](https://dalink.to/this_is_really)
+[Boosty](https://boosty.to/this-is-really)
 
 Your support will accelerate development and help ensure the long-term maintenance of this project
