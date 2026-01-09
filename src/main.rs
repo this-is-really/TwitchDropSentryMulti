@@ -324,14 +324,16 @@ async fn drop_sync (clients: Vec<Arc<TwitchClient>>, tx: Sender<String>, cash_pa
 async fn claim_drop (client: &Arc<TwitchClient>, drop_progress_id: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
     loop {
         let inv = retry!(client.get_inventory());
-        for in_progress in inv.inventory.dropCampaignsInProgress {
-            for time_based in in_progress.timeBasedDrops {
-                if time_based.id == drop_progress_id {
-                    if let Some(id) = time_based.self_drop.dropInstanceID {
-                        match client.claim_drop(&id).await {
-                            Ok(_) => return Ok(()),
-                            Err(ClaimDropError::DropAlreadyClaimed) => return Ok(()),
-                            Err(e) => return Err(e)?
+        if let Some(campaigns_in_progress) = inv.inventory.dropCampaignsInProgress {
+            for in_progress in campaigns_in_progress {
+                for time_based in in_progress.timeBasedDrops {
+                    if time_based.id == drop_progress_id {
+                        if let Some(id) = time_based.self_drop.dropInstanceID {
+                            match client.claim_drop(&id).await {
+                                Ok(_) => return Ok(()),
+                                Err(ClaimDropError::DropAlreadyClaimed) => return Ok(()),
+                                Err(e) => return Err(e)?
+                            }
                         }
                     }
                 }
