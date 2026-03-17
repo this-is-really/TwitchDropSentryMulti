@@ -1587,9 +1587,9 @@ dependencies = [
 
 [[package]]
 name = "twitch-gql-rs"
-version = "0.2.4"
+version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9779d87b7101d572561d5557b42b13faaedd3ef7aec01f5b2497ff911652ce64"
+checksum = "1d7bfb0a07edb1daad6cd1619416d1bca15861bf02debe0b295a5f4ff7bfa671"
 dependencies = [
  "base64",
  "rand",
