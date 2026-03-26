@@ -98,9 +98,27 @@ async fn main () -> Result<(), Box<dyn Error>> {
         *lock = Some(loaded_clients);
     }
 
+    let settings_path = home_dir.join("settings.json");
+    if !settings_path.exists() {
+        let settings = serde_json::to_string_pretty(&Settings { game: String::new(), autostart: false })?;
+        fs::write(&settings_path, settings.as_bytes()).await?;
+    }
+
+    let settings: Settings = {
+        let content = fs::read_to_string(&settings_path).await?;
+        serde_json::from_str(&content)?
+    };
+
+    configure_autostart(&settings)?;
+
     let items = vec!["Add account", "Start farming"];
     loop {
-       let select = dialoguer::Select::new().with_prompt("Select option").items(&items).default(0).interact()?;
+        let select = if !settings.game.is_empty() {
+            1
+        } else {
+            dialoguer::Select::new().with_prompt("Select option").items(&items).default(0).interact()?
+        };
+
         match select {
             0 => {
                 create_client(&home_dir).await.unwrap()
@@ -133,7 +151,7 @@ async fn main () -> Result<(), Box<dyn Error>> {
                     grouped.entry(idx).or_default().push(obj);
                 }
 
-                main_logic(client, grouped, home_dir).await?;
+                main_logic(client, grouped, home_dir, &settings).await?;
             },
             _ => {}
         } 
@@ -163,20 +181,7 @@ fn configure_autostart (settings: &Settings) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-async fn main_logic (client: Arc<TwitchClient> ,grouped: BTreeMap<usize, Vec<DropCampaigns>>, home_dir: &Path) -> Result<(), Box<dyn Error>> {
-    let settings_path = home_dir.join("settings.json");
-    if !settings_path.exists() {
-        let settings = serde_json::to_string_pretty(&Settings { game: String::new(), autostart: false })?;
-        fs::write(&settings_path, settings.as_bytes()).await?;
-    }
-
-    let settings: Settings = {
-        let content = fs::read_to_string(&settings_path).await?;
-        serde_json::from_str(&content)?
-    };
-
-    configure_autostart(&settings)?;
-
+async fn main_logic (client: Arc<TwitchClient> ,grouped: BTreeMap<usize, Vec<DropCampaigns>>, home_dir: &Path, settings: &Settings) -> Result<(), Box<dyn Error>> {
     let current_campaigns: Vec<DropCampaigns> = if !settings.game.is_empty() {
         grouped.values().flat_map(|campaign| {
             campaign.iter().filter(|c| c.game.displayName.to_lowercase() == settings.game.to_lowercase()).cloned()
