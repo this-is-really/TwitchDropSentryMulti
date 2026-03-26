@@ -1,68 +1,90 @@
-# 🚀 Drop_Sentry (0.1.0 Multi-Account Beta) Release Notes
+# 🚀 Drop_Sentry (Multi-Account Beta)
 
-> [!NOTE]
->
-> ## 🚀 Multi-Account Beta Release Notice **0.1.0**
->
-> This is a **Beta release** **0.1.0** focused on introducing **multi-account support**. The core drop-claiming functionality is forked from the stable **0.3.0-rs.1** codebase, but the multi-account management is **new and currently unstable**.
->
-> Your main purpose in testing this version is to:
->
-> * **Stress-test** the multi-account login, session management, and concurrent claiming logic.
-> * Find any new **bugs** or unexpected edge-cases related to managing multiple users.
-> * Evaluate the **usability** of the new multi-account configuration process.
->
-> **Do not use this version for critical production data, especially on your primary accounts.**
->
-> **Thank you for helping us stabilize this major feature!**
+> [!WARNING]
+> **This is a Beta release (0.1.0+)** focused on **multi-account support**.  
+> The core drop-claiming logic is stable (forked from 0.3.0-rs.1), but multi-account login, session management, and concurrent claiming are **new and still experimental**.  
+> 
+> **Use this version only for testing.** Do not run it on your primary accounts or with valuable data.
 
------
+**Your help is extremely valuable:** stress-test multi-account functionality, report bugs, and help us stabilize this major feature.
 
-[![Discord](https://img.shields.io/discord/1437005378750775359?style=for-the-badge&logo=discord)](https://discord.gg/7H7n4RPtJG)
+---
 
-## What is this?
+[![Discord](https://img.shields.io/discord/1437005378750775359?style=for-the-badge&logo=discord&label=Discord)](https://discord.gg/7H7n4RPtJG)
 
-This is a **forked command-line tool** designed to automatically watch Twitch streams and claim Time-Based Drops for a selected game, with a **primary focus on managing multiple Twitch accounts concurrently**.
+## What is Drop_Sentry?
 
-> 💡 **Forked from:** This project is a fork of the original [**Drop_Sentry**](https://github.com/this-is-really/TwitchDropSentry) project, focusing on the new multi-account feature set.
+**Drop_Sentry** is a powerful command-line tool that automatically watches Twitch streams and claims **Time-Based Drops** for selected games — now with full **multi-account support**.
 
-It runs in the background, finds eligible streams, simulates watch time by sending the necessary **GQL** events, and automatically claims drops for **all configured users** as they become available.
+It runs in the background, finds eligible live streams, simulates watching time by sending the required GQL events, and claims drops for **all configured accounts** as soon as they become available.
 
-### How it Works (New Multi-Account Focus)
+> 💡 **This is a multi-account fork** of the original [Drop_Sentry](https://github.com/this-is-really/TwitchDropSentry) project.
 
-1. **Supports multiple accounts:** You can now log into and manage several Twitch accounts simultaneously.
-2. Logs in to **all configured Twitch accounts** (saves credentials to `data/{ACCOUNT_NAME}.json`).
-3. Fetches active Drop Campaigns and **groups them by game** to ask you to select one.
-4. For **each active account**, it finds and prioritizes the **best eligible live stream** for that campaign.
-5. Simulates "watching" that stream for every account. **Note:** The underlying **GQL** implementation is powered by [**twitch-gql-rs**](https://github.com/this-is-really/twitch-gql-rs).
-6. Monitors drop progress with a **real-time terminal progress bar** for each user/drop.
-7. **Automatically claims** the drop once the required time is met, with robust retry logic.
-8. Saves claimed drops to `data/cash.json` (per-account logging) to avoid re-claiming.
+### ✨ Key Features
+- Simultaneous support for **multiple Twitch accounts**
+- Automatic login and persistent session management
+- Smart grouping of Drop Campaigns by game
+- Intelligent selection of the best eligible live stream per account
+- Real-time terminal progress bars for every user and drop
+- Automatic claiming with robust retry logic
+- Per-account drop history (`data/cash.json`)
+- Configurable game selection and autostart
+- Powered by [**twitch-gql-rs**](https://github.com/this-is-really/twitch-gql-rs)
 
------
+## How It Works
+
+1. Logs into **all configured Twitch accounts** (sessions saved in `data/{ACCOUNT_NAME}.json`)
+2. Fetches active Drop Campaigns and groups them by game
+3. Lets you select a game (or uses the one specified in config)
+4. For each account, finds and joins the best eligible live stream
+5. Simulates watching by sending GQL events
+6. Shows real-time progress for every account
+7. Automatically claims the drop when requirements are met
+8. Saves claim history to prevent re-claiming
+
+## Configuration (since 0.1.3-beta)
+
+You can now customize behavior with a simple JSON config.
+
+Example (`data/config.json`):
+
+```json
+{
+  "game": "Rust",
+  "autostart": true
+}
+```
+
+- `"game"`: If set to a non-empty string, the tool **skips the interactive menu** and immediately starts farming drops for that game.
+- `"autostart"`: If `true`, the miner registers itself as a system startup application and launches automatically with Windows/Linux.
 
 ## 💻 Available Binaries
 
-Standard pre-compiled binaries are provided for common platforms.
+Pre-compiled executables are provided for the most common platforms:
 
-* **Windows:** Executable for **x86_64** architecture **.exe** file.
-* **Linux:** **ELF** executable for **x86_64** architecture.
+- **Windows** — `x86_64` `.exe`
+- **Linux** — `x86_64` ELF executable
 
------
+## Data Storage & Important Disclaimer
+
+All account credentials, sessions, and claim data are stored in **plain JSON files** inside the `data/` folder.
+
+**We are not responsible** for:
+- Any data leaks
+- Twitch account bans due to suspicious activity
+- Any other consequences of using this tool
+
+**Use at your own risk.** Never run this on your main/primary accounts with valuable data.
 
 ## 🐞 Found a Bug?
 
-This **Beta release is highly focused on multi-account stability**. If you encounter *any* crashes, errors, or unexpected behavior-**especially** when managing multiple users—please **open an Issue** in this repository immediately. Your feedback is crucial for stabilizing this core feature.
+This beta version is heavily focused on multi-account stability.  
+If you encounter **any** crashes, errors, or unexpected behavior (especially with multiple accounts), please **open an Issue** immediately. Your feedback is crucial.
 
------
+## 🎉 Did you like the project?
 
-## 🎉 Did you like the app?
-
-Please consider rating this repository by clicking the star in the top-right corner of the page on GitHub (you need to be logged into your account). This gives me the motivation to keep developing this project.
-
-![Star](https://i.ibb.co/3YkyqJQ8/2025-10-31-20-25.png)
-
------
+If Drop_Sentry is useful to you, please consider **starring the repository** ⭐  
+It really helps the project grow and motivates further development.
 
 ## ❤️ Support the Developer
 
@@ -70,6 +92,8 @@ Please consider rating this repository by clicking the star in the top-right cor
 
 [![DonationAlerts](https://www.donationalerts.com/img/brand/donationalerts.svg)](https://www.donationalerts.com/r/this_is_really)
 
-[Boosty](https://boosty.to/this-is-really)
+**[Boosty](https://boosty.to/this-is-really)**
 
-Your support will accelerate development and help ensure the long-term maintenance of this project
+Your support greatly accelerates development and helps ensure long-term maintenance of the project.
+
+</div>
