@@ -1,24 +1,25 @@
-use std::{collections::{BTreeMap, HashMap, HashSet}, env, error::Error, path::{Path, PathBuf}, sync::Arc, time::Duration};
+use std::{collections::{BTreeMap, HashMap, HashSet, VecDeque}, error::Error, path::{Path, PathBuf}, sync::Arc, time::Duration};
 
-use auto_launch::AutoLaunchBuilder;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use serde::{Deserialize, Serialize};
+use rand::{rng, seq::SliceRandom};
 use tokio::{fs::{self}, sync::{Notify, broadcast::{self, Receiver, error::TryRecvError}, watch::Sender}, time::{sleep}};
 use tracing::{info};
 use tracing_appender::rolling;
 use tracing_subscriber::fmt::writer::BoxMakeWriter;
 use twitch_gql_rs::{TwitchClient, client_type::ClientType, error::ClaimDropError, structs::DropCampaigns};
 
-use crate::{r#static::{ACCOUNTS, Channel, DROP_CASH, retry_backup}, stream::{filter_streams, update_stream}};
 mod r#static;
 mod stream;
+mod config;
+
+use crate::{r#static::*, stream::*, config::*};
 
 const STREAM_SLEEP: u64 = 20;
 const MAX_COUNT: u64 = 3;
 
 async fn create_client (home_dir: &Path) -> Result<(), Box<dyn Error>> {
     let client_type = ClientType::android_app();
-    let mut client = TwitchClient::new(&client_type).await?;
+    let mut client = TwitchClient::new(&client_type, &None).await?;
     let mut count = 0;
     loop {
         count += 1;
@@ -46,7 +47,7 @@ async fn create_client (home_dir: &Path) -> Result<(), Box<dyn Error>> {
     if !path.exists() {
         client.save_file(&path).await?;
     }
-    let client = TwitchClient::load_from_file(&path).await?;
+    let client = TwitchClient::load_from_file(&path, &None).await?;
     let login = client.login.clone().unwrap_or_default();
 
     let mut accounts = ACCOUNTS.lock().await;
@@ -68,12 +69,6 @@ async fn create_client (home_dir: &Path) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct Settings {
-    game: String,
-    autostart: bool
-}
-
 #[tokio::main]
 async fn main () -> Result<(), Box<dyn Error>> {
     let file_appender = rolling::never(".", "app.log");
@@ -83,12 +78,29 @@ async fn main () -> Result<(), Box<dyn Error>> {
         fs::create_dir_all(&home_dir).await?;
     }
 
+    let config_path = home_dir.join("config.json");
+    if !config_path.exists() {
+        let config = Config::new().await?;
+        config.save(&config_path).await?
+    }
+
+    let config = Config::load(&config_path).await?;
+    config.configure_autostart()?;
+
+    let mut proxies = config.load_proxies_list().await?;
+
+    let mut rng = rng();
+    proxies.shuffle(&mut rng);
+
+    let mut proxy_pool = proxies.iter().cycle();
+
     let mut loaded_clients = Vec::new();
     let mut entries = fs::read_dir(&home_dir).await?;
     while let Some(entry) = entries.next_entry().await? {
         let path = entry.path();
-        if path.is_file() && path.extension().map_or(false, |s| s == "json" ) && path.file_name().unwrap_or_default() != "cash.json" && path.file_name().unwrap_or_default() != "settings.json" {
-            let client = TwitchClient::load_from_file(&path).await?;
+        if path.is_file() && path.extension().map_or(false, |s| s == "json" ) && path.file_name().unwrap_or_default() != "cash.json" && path.file_name().unwrap_or_default() != "config.json" {
+            let selected_proxy = proxy_pool.next();
+            let client = TwitchClient::load_from_file(&path, &selected_proxy.cloned()).await?;
             loaded_clients.push(Arc::new(client));
         }
     }
@@ -98,22 +110,11 @@ async fn main () -> Result<(), Box<dyn Error>> {
         *lock = Some(loaded_clients);
     }
 
-    let settings_path = home_dir.join("settings.json");
-    if !settings_path.exists() {
-        let settings = serde_json::to_string_pretty(&Settings { game: String::new(), autostart: false })?;
-        fs::write(&settings_path, settings.as_bytes()).await?;
-    }
-
-    let settings: Settings = {
-        let content = fs::read_to_string(&settings_path).await?;
-        serde_json::from_str(&content)?
-    };
-
-    configure_autostart(&settings)?;
+    let games = config.loaded_games().await?;
 
     let items = vec!["Add account", "Start farming"];
     loop {
-        let select = if !settings.game.is_empty() {
+        let select = if !games.is_empty() {
             1
         } else {
             dialoguer::Select::new().with_prompt("Select option").items(&items).default(0).interact()?
@@ -136,7 +137,7 @@ async fn main () -> Result<(), Box<dyn Error>> {
                 let campaign = campaign.dropCampaigns;
 
                 let mut id_to_index = HashMap::new();
-                let mut grouped: BTreeMap<usize, Vec<DropCampaigns>> = BTreeMap::new();
+                let mut grouped: BTreeMap<usize, VecDeque<DropCampaigns>> = BTreeMap::new();
                 let mut next_index: usize = 0;
                 for obj in campaign {
                     if obj.status == "EXPIRED" {
@@ -148,43 +149,28 @@ async fn main () -> Result<(), Box<dyn Error>> {
                         i
                     });
 
-                    grouped.entry(idx).or_default().push(obj);
+                    grouped.entry(idx).or_default().push_front(obj);
                 }
 
-                main_logic(client, grouped, home_dir, &settings).await?;
+                main_logic(client, grouped, home_dir, &games).await?;
             },
             _ => {}
         } 
     }
 }
 
-fn configure_autostart (settings: &Settings) -> Result<(), Box<dyn Error>> {
-    let app_path = {
-        let path = env::current_exe()?;
-        path.to_str().ok_or("Unable to convert executable path to string")?.to_string()
-    };
-    let auto =AutoLaunchBuilder::new()
-        .set_app_name("TwitchDropSentry")
-        .set_app_path(&app_path)
-        .set_macos_launch_mode(auto_launch::MacOSLaunchMode::LaunchAgent)
-        .set_linux_launch_mode(auto_launch::LinuxLaunchMode::XdgAutostart)
-        .set_windows_enable_mode(auto_launch::WindowsEnableMode::Dynamic)
-        .build()?;
+async fn main_logic (client: Arc<TwitchClient> ,grouped: BTreeMap<usize, VecDeque<DropCampaigns>>, home_dir: &Path, games: &VecDeque<String>) -> Result<(), Box<dyn Error>> {
+    let current_campaigns: VecDeque<VecDeque<DropCampaigns>> = if !games.is_empty() {
+        games.iter().filter_map(|game_name| {
+            let campaigns_for_game: VecDeque<_> = grouped.values().flat_map(|campaigns_vec| {
+                campaigns_vec.iter().filter(|campaign| campaign.game.displayName.to_lowercase().trim() == game_name.to_lowercase().trim()).cloned()
+            }).collect();
 
-    if settings.autostart {
-        if !auto.is_enabled()? {
-            auto.enable()?;
-        }
-    } else {
-        auto.disable()?;
-    }
-    Ok(())
-}
-
-async fn main_logic (client: Arc<TwitchClient> ,grouped: BTreeMap<usize, Vec<DropCampaigns>>, home_dir: &Path, settings: &Settings) -> Result<(), Box<dyn Error>> {
-    let current_campaigns: Vec<DropCampaigns> = if !settings.game.is_empty() {
-        grouped.values().flat_map(|campaign| {
-            campaign.iter().filter(|c| c.game.displayName.to_lowercase() == settings.game.to_lowercase()).cloned()
+            if campaigns_for_game.is_empty() {
+                None
+            } else {
+                Some(campaigns_for_game)
+            }
         }).collect()
     } else {
         for (id, obj) in &grouped {
@@ -193,7 +179,8 @@ async fn main_logic (client: Arc<TwitchClient> ,grouped: BTreeMap<usize, Vec<Dro
             }
         }
         let input: usize = dialoguer::Input::new().with_prompt("Select game").interact_text()?;
-        grouped.get(&input).cloned().unwrap_or_default()
+        let selected = grouped.get(&input).cloned().unwrap_or_default();
+        vec![selected].into()
     };
 
     if current_campaigns.is_empty() {
@@ -228,22 +215,24 @@ async fn main_logic (client: Arc<TwitchClient> ,grouped: BTreeMap<usize, Vec<Dro
     let mut pending_drops: HashSet<String> = HashSet::new();
     {
         let cash = DROP_CASH.lock().await.clone();
-        for campaign in &current_campaigns {
-            let mut campaign_details = retry!(client.get_campaign_details(&campaign.id));
-            for (_, claimed_drops) in &cash {
-                for drop_id_cache in claimed_drops {
-                    if let Some(pos) = campaign_details.timeBasedDrops.iter().position(|d| d.id == *drop_id_cache) {
-                        campaign_details.timeBasedDrops.remove(pos);
+
+        for game_campaign in current_campaigns {
+            for campaign in game_campaign {
+                let mut campaign_details = retry!(client.get_campaign_details(&campaign.id));
+                for (_, claimed_drops) in &cash {
+                    for drop_id_cache in claimed_drops {
+                        if let Some(pos) = campaign_details.timeBasedDrops.iter().position(|d| d.id == *drop_id_cache) {
+                            campaign_details.timeBasedDrops.remove(pos);
+                        }
                     }
                 }
-            }
-            for drop in campaign_details.timeBasedDrops {
-                pending_drops.insert(drop.id);
-            }
+                for drop in campaign_details.timeBasedDrops {
+                    pending_drops.insert(drop.id);
+                }
+        }
         }
     }
-    info!("Starting farming {} campaigns / {} total drops for game '{}'", &current_campaigns.len(), pending_drops.len(), current_campaigns[0].game.displayName);
-    
+
     while !pending_drops.is_empty() {
         rx_watch.changed().await.ok();
         let drop_id = rx_watch.borrow().clone();
@@ -391,6 +380,10 @@ async fn drop_sync(clients: Vec<Arc<TwitchClient>>, tx: Sender<String>, cash_pat
             
                 if drop_progress.dropID.is_empty() || drop_progress.currentMinutesWatched >= drop_progress.requiredMinutesWatched {
                     notify.notify_one();
+                    if drop_progress.dropID.is_empty() {
+                        let mut lock = CHANNEL_IDS.lock().await;
+                        lock.retain(|c| c.channel_id != watching.channel_id);
+                    }
                 }
 
                 sleep(Duration::from_secs(30)).await;

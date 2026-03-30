@@ -1,4 +1,4 @@
-use std::{collections::{BinaryHeap, HashSet}, error::Error, sync::Arc, time::Duration};
+use std::{collections::{BinaryHeap, HashMap, HashSet, VecDeque}, error::Error, sync::Arc, time::Duration};
 
 use tokio::sync::{Mutex, Notify, broadcast::{self, Sender}, watch::Receiver};
 
@@ -9,65 +9,76 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::debug;
 use twitch_gql_rs::{TwitchClient, structs::{Channels, DropCampaigns, GameDirectory}};
 
-use crate::{retry, r#static::{ALLOW_CHANNELS, CHANNEL_IDS, Channel, DEFAULT_CHANNELS, retry_backup}};
+use crate::{retry, r#static::{ALLOW_CHANNELS, CAMPAIGN_PRIORITY, CHANNEL_IDS, Channel, DEFAULT_CHANNELS, retry_backup}};
 
 const UPDATE_TIME: u64 = 15;
 const MAX_TOPICS: usize = 40;
 const WS_URL: &'static str = "wss://pubsub-edge.twitch.tv/v1";
 
-pub async fn filter_streams (client: Arc<TwitchClient>, campaigns: Arc<Vec<DropCampaigns>>) {
+pub async fn filter_streams (client: Arc<TwitchClient>, campaigns: Arc<VecDeque<VecDeque<DropCampaigns>>>) {
     let mut count = 0;
     let mut video_vec = HashSet::new();
-    for campaign in campaigns.iter() {
-        let campaign_details = retry!(client.get_campaign_details(&campaign.id));
-        if let Some(allow) = campaign_details.allow.channels {
-            let mut allow_channels = ALLOW_CHANNELS.lock().await;
-            let allow: HashSet<Channels> = allow.into_iter().collect();
-            allow_channels.insert(campaign.id.to_string(), allow.clone());
-            drop(allow_channels);
-            for channel in allow {
-                let stream_info = if let Ok(stream) = client.get_stream_info(&channel.name).await {
-                    stream
-                } else {
-                    continue;
-                };
+    let mut priority_map = HashMap::new();
 
-                if stream_info.stream.is_some() {
+    for (game_idx, campaign_queue) in campaigns.iter().enumerate() {
+        let base_prio = ((campaigns.len() - game_idx) * 10) as u32;
+        for campaign in campaign_queue {
+            priority_map.insert(campaign.id.clone(), base_prio);
+            let campaign_details = retry!(client.get_campaign_details(&campaign.id));
+            if let Some(allow) = campaign_details.allow.channels {
+                let mut allow_channels = ALLOW_CHANNELS.lock().await;
+                let allow: HashSet<Channels> = allow.into_iter().collect();
+                allow_channels.insert(campaign.id.to_string(), allow.clone());
+                drop(allow_channels);
+                for channel in allow {
+                    let stream_info = if let Ok(stream) = client.get_stream_info(&channel.name).await {
+                        stream
+                    } else {
+                        continue;
+                    };
+
+                    if stream_info.stream.is_some() {
+                        if count >= MAX_TOPICS {
+                            break;
+                        }
+                        let avaiable_drops = retry!(client.get_available_drops_for_channel(&channel.id));
+                        if avaiable_drops.viewerDropCampaigns.is_some() {
+                            video_vec.insert(Channel { channel_id: channel.id, channel_login: channel.name });
+                            count += 1
+                        }
+                    }
+                }
+            } else {
+                let game_directory = retry!(client.get_game_directory(&campaign_details.game.slug, 30, true));
+                let mut all_default = DEFAULT_CHANNELS.lock().await;
+                let game_directory: HashSet<GameDirectory> = game_directory.into_iter().collect();
+                all_default.insert(campaign.id.to_string(), game_directory.clone());
+                drop(all_default);
+                for channel in game_directory {
+                    let stream_info = if let Ok(stream) = client.get_stream_info(&channel.broadcaster.login).await {
+                        stream
+                    } else {
+                        continue;
+                    };
                     if count >= MAX_TOPICS {
                         break;
                     }
-                    let avaiable_drops = retry!(client.get_available_drops_for_channel(&channel.id));
-                    if avaiable_drops.viewerDropCampaigns.is_some() {
-                        video_vec.insert(Channel { channel_id: channel.id, channel_login: channel.name });
-                        count += 1
-                    }
-                }
-            }
-        } else {
-            let game_directory = retry!(client.get_game_directory(&campaign_details.game.slug, 30, true));
-            let mut all_default = DEFAULT_CHANNELS.lock().await;
-            let game_directory: HashSet<GameDirectory> = game_directory.into_iter().collect();
-            all_default.insert(campaign.id.to_string(), game_directory.clone());
-            drop(all_default);
-            for channel in game_directory {
-                let stream_info = if let Ok(stream) = client.get_stream_info(&channel.broadcaster.login).await {
-                    stream
-                } else {
-                    continue;
-                };
-                if count >= MAX_TOPICS {
-                    break;
-                }
-                if stream_info.stream.is_some() {
-                    let available_drops = retry!(client.get_available_drops_for_channel(&channel.broadcaster.id));
-                    if available_drops.viewerDropCampaigns.is_some() {
-                        video_vec.insert(Channel { channel_id: channel.broadcaster.id, channel_login: channel.broadcaster.login });
-                        count += 1
+                    if stream_info.stream.is_some() {
+                        let available_drops = retry!(client.get_available_drops_for_channel(&channel.broadcaster.id));
+                        if available_drops.viewerDropCampaigns.is_some() {
+                            video_vec.insert(Channel { channel_id: channel.broadcaster.id, channel_login: channel.broadcaster.login });
+                            count += 1
+                        }
                     }
                 }
             }
         }
     }
+
+    let mut cp_lock = CAMPAIGN_PRIORITY.lock().await;
+    *cp_lock = priority_map;
+    drop(cp_lock);
+
     let mut lock = CHANNEL_IDS.lock().await;
     *lock = video_vec;
     drop(lock);
@@ -81,59 +92,61 @@ pub async fn filter_streams (client: Arc<TwitchClient>, campaigns: Arc<Vec<DropC
             drop(lock);
             if count < MAX_TOPICS {
                 let mut to_add = HashSet::new();
-                for campaign in campaigns.iter() {
-                    let allow_channels = ALLOW_CHANNELS.lock().await;
-                    if let Some(channels) = allow_channels.get(&campaign.id) {
-                        for channel in channels {
-                            if to_add.len() + count  >= MAX_TOPICS {
-                                break;
-                            }
-                            let stream_info = if let Ok(channel) = client.get_stream_info(&channel.name).await {
-                                channel
-                            } else {
-                                continue;
-                            };
+                for campaign_queue in campaigns.iter() {
+                    for campaign in campaign_queue {
+                        let allow_channels = ALLOW_CHANNELS.lock().await;
+                        if let Some(channels) = allow_channels.get(&campaign.id) {
+                            for channel in channels {
+                                if to_add.len() + count  >= MAX_TOPICS {
+                                    break;
+                                }
+                                let stream_info = if let Ok(channel) = client.get_stream_info(&channel.name).await {
+                                    channel
+                                } else {
+                                    continue;
+                                };
 
-                            if stream_info.stream.is_some() {
-                                let available_drops = retry!(client.get_available_drops_for_channel(&channel.id));
-                                if available_drops.viewerDropCampaigns.is_some() {
-                                    to_add.insert(Channel { channel_id: channel.id.clone(), channel_login: channel.name.clone() });
+                                if stream_info.stream.is_some() {
+                                    let available_drops = retry!(client.get_available_drops_for_channel(&channel.id));
+                                    if available_drops.viewerDropCampaigns.is_some() {
+                                        to_add.insert(Channel { channel_id: channel.id.clone(), channel_login: channel.name.clone() });
+                                    }
                                 }
                             }
-                        }
-                    } else {
-                        let mut default_channels = DEFAULT_CHANNELS.lock().await;
-                        let slug = retry!(client.get_slug(&campaign.game.displayName));
-                        let game_directory = retry!(client.get_game_directory(&slug, 30, true));
-                        let game_directory: HashSet<GameDirectory> = game_directory.into_iter().collect();
-                        default_channels.insert(campaign.id.clone(), game_directory.clone());
-                        
-                        for channel in &game_directory {
-                            if to_add.len() + count >= MAX_TOPICS {
-                                break;
-                            }
+                        } else {
+                            let mut default_channels = DEFAULT_CHANNELS.lock().await;
+                            let slug = retry!(client.get_slug(&campaign.game.displayName));
+                            let game_directory = retry!(client.get_game_directory(&slug, 30, true));
+                            let game_directory: HashSet<GameDirectory> = game_directory.into_iter().collect();
+                            default_channels.insert(campaign.id.clone(), game_directory.clone());
 
-                            let stream_info = if let Ok(stream) = client.get_stream_info(&channel.broadcaster.login).await {
-                                stream
-                            } else {
-                                continue;
-                            };
-
-                            if stream_info.stream.is_some() {
-                                let available_drops = retry!(client.get_available_drops_for_channel(&channel.broadcaster.id));
-                                if available_drops.viewerDropCampaigns.is_some() {
-                                    to_add.insert(Channel { channel_id: channel.broadcaster.id.clone(), channel_login: channel.broadcaster.login.clone() });
+                            for channel in &game_directory {
+                                if to_add.len() + count >= MAX_TOPICS {
+                                    break;
                                 }
+
+                                let stream_info = if let Ok(stream) = client.get_stream_info(&channel.broadcaster.login).await {
+                                    stream
+                                } else {
+                                    continue;
+                                };
+
+                                if stream_info.stream.is_some() {
+                                    let available_drops = retry!(client.get_available_drops_for_channel(&channel.broadcaster.id));
+                                    if available_drops.viewerDropCampaigns.is_some() {
+                                        to_add.insert(Channel { channel_id: channel.broadcaster.id.clone(), channel_login: channel.broadcaster.login.clone() });
+                                    }
+                                }
+
                             }
-                            
+                            drop(default_channels);
                         }
-                        drop(default_channels);
-                    }
 
-                    if to_add.len() + count >= MAX_TOPICS {
-                        break;
-                    }
+                        if to_add.len() + count >= MAX_TOPICS {
+                            break;
+                        }
 
+                    }   
                 }
 
                 let mut lock = CHANNEL_IDS.lock().await;
@@ -342,6 +355,7 @@ pub async fn update_stream (tx_now_watch: Sender<Channel>, notify: Arc<Notify>) 
             let channel_ids = CHANNEL_IDS.lock().await.clone();
             let allow_channels = ALLOW_CHANNELS.lock().await.clone();
             let default_channels = DEFAULT_CHANNELS.lock().await.clone();
+            let campaign_priority = CAMPAIGN_PRIORITY.lock().await.clone();
 
             if channel_ids.is_empty() || (allow_channels.is_empty() && default_channels.is_empty()) {
                 sleep(Duration::from_secs(UPDATE_TIME)).await;
@@ -373,17 +387,19 @@ pub async fn update_stream (tx_now_watch: Sender<Channel>, notify: Arc<Notify>) 
 
                 let mut prio = 0;
 
-                let is_allow = allow_channels.iter().any(|(_, allow_set)| {
-                    allow_set.iter().any(|s| s.id == channel.channel_id)
-                });
-                if is_allow {
-                    prio = 3;
-                } else {
-                    let is_default = default_channels.iter().any(|(_, def_set)| {
-                        def_set.iter().any(|s| s.broadcaster.id == channel.channel_id)
-                    });
-                    if is_default {
-                        prio = 2;
+                for (camp_id, allow_set) in &allow_channels {
+                    if allow_set.iter().any(|s| s.id == channel.channel_id) {
+                        let base = *campaign_priority.get(camp_id).unwrap_or(&0);
+                        let current_prio = base + 3;
+                        if current_prio > prio { prio = current_prio; }
+                    }
+                }
+            
+                for (camp_id, def_set) in &default_channels {
+                    if def_set.iter().any(|s| s.broadcaster.id == channel.channel_id) {
+                        let base = *campaign_priority.get(camp_id).unwrap_or(&0);
+                        let current_prio = base + 2;
+                        if current_prio > prio { prio = current_prio; }
                     }
                 }
 
@@ -393,6 +409,12 @@ pub async fn update_stream (tx_now_watch: Sender<Channel>, notify: Arc<Notify>) 
                         name: channel.clone(),
                     });
                 }
+            }
+
+            if new_heap.is_empty() {
+                watched.clear();
+                sleep(Duration::from_secs(UPDATE_TIME)).await;
+                continue;
             }
             
             old_channel_ids = channel_ids;

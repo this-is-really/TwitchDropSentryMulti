@@ -22,6 +22,8 @@ pub static DEFAULT_CHANNELS: Lazy<Arc<Mutex<HashMap<String, HashSet<GameDirector
 
 pub static ALLOW_CHANNELS: Lazy<Arc<Mutex<HashMap<String, HashSet<Channels>>>>> = Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
 
+pub static CAMPAIGN_PRIORITY: Lazy<Arc<Mutex<HashMap<String, u32>>>> = Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
+
 #[macro_export]
 macro_rules! retry {
     ($func:expr) => {
