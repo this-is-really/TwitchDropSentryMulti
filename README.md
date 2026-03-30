@@ -25,6 +25,8 @@ Watch streams and claim time-based drops **for all your accounts at once** - com
 - **Auto-claim + anti-duplicate protection**  
 - **Lightweight & fast** - pure Rust, no browser, no bloat  
 
+![DropSentry Interface](assets/bars.gif)
+
 **This is the evolved multi-account fork** of the original TwitchDropSentry, built for real drop farmers.
 
 ## 🚀 Quick Start (30 seconds)
