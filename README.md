@@ -1,99 +1,127 @@
-# 🚀 Drop_Sentry (Multi-Account Beta)
+# 🚀 Drop_Sentry
 
-> [!WARNING]
-> **This is a Beta release (0.1.0+)** focused on **multi-account support**.  
-> The core drop-claiming logic is stable (forked from 0.3.0-rs.1), but multi-account login, session management, and concurrent claiming are **new and still experimental**.  
-> 
-> **Use this version only for testing.** Do not run it on your primary accounts or with valuable data.
+[![Discord](https://img.shields.io/discord/1437005378750775359?style=for-the-badge&logo=discord&label=Join%20Discord)](https://discord.gg/7H7n4RPtJG)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Rust](https://img.shields.io/badge/Rust-000000?style=for-the-badge&logo=rust&logoColor=white)](https://www.rust-lang.org)
+[![Version](https://img.shields.io/badge/Version-1.0.0-success?style=for-the-badge)](https://github.com/this-is-really/TwitchDropSentryMulti/releases)
 
-**Your help is extremely valuable:** stress-test multi-account functionality, report bugs, and help us stabilize this major feature.
+**Next-level multi-account Twitch Drops farmer.**  
+Watch streams and claim time-based drops **for all your accounts at once** - completely hands-free, blazing fast, and extremely lightweight.
 
 ---
 
-[![Discord](https://img.shields.io/discord/1437005378750775359?style=for-the-badge&logo=discord&label=Discord)](https://discord.gg/7H7n4RPtJG)
+> [!IMPORTANT]  
+> **DropSentry 1.0.0 - Stable Release!**  
+> After extensive testing and your valuable feedback, I’m fully confident: the code is production-ready.  
+> No more beta status. From this version onward, the project is officially **stable**.  
 
-## What is Drop_Sentry?
+## ✨ Why DropSentry Stands Out
 
-**Drop_Sentry** is a powerful command-line tool that automatically watches Twitch streams and claims **Time-Based Drops** for selected games — now with full **multi-account support**.
+- **True multi-account support** - run as many Twitch accounts as you want simultaneously  
+- **Smart game priority system** - just list your games; the higher in the file, the higher the priority  
+- **Proxy support** - dedicated proxy list for maximum privacy and safety  
+- **Autostart + fully customizable config**  
+- **Beautiful real-time UI** with per-account progress bars  
+- **Auto-claim + anti-duplicate protection**  
+- **Lightweight & fast** - pure Rust, no browser, no bloat  
 
-It runs in the background, finds eligible live streams, simulates watching time by sending the required GQL events, and claims drops for **all configured accounts** as soon as they become available.
+**This is the evolved multi-account fork** of the original TwitchDropSentry, built for real drop farmers.
 
-> 💡 **This is a multi-account fork** of the original [Drop_Sentry](https://github.com/this-is-really/TwitchDropSentry) project.
+## 🚀 Quick Start (30 seconds)
 
-### ✨ Key Features
-- Simultaneous support for **multiple Twitch accounts**
-- Automatic login and persistent session management
-- Smart grouping of Drop Campaigns by game
-- Intelligent selection of the best eligible live stream per account
-- Real-time terminal progress bars for every user and drop
-- Automatic claiming with robust retry logic
-- Per-account drop history (`data/cash.json`)
-- Configurable game selection and autostart
-- Powered by [**twitch-gql-rs**](https://github.com/this-is-really/twitch-gql-rs)
+1. Download the latest release from [Releases](https://github.com/this-is-really/TwitchDropSentryMulti/releases)
+2. Run `twitchdrops_miner.exe` (Windows) or `./twitchdrops_miner` (Linux)
+3. Log in to all your accounts (sessions are saved automatically)
+4. Done - the tool will create the `lists/` folder and start farming right away
 
-## How It Works
+## ⚙️ Configuration (since 1.0.0)
 
-1. Logs into **all configured Twitch accounts** (sessions saved in `data/{ACCOUNT_NAME}.json`)
-2. Fetches active Drop Campaigns and groups them by game
-3. Lets you select a game (or uses the one specified in config)
-4. For each account, finds and joins the best eligible live stream
-5. Simulates watching by sending GQL events
-6. Shows real-time progress for every account
-7. Automatically claims the drop when requirements are met
-8. Saves claim history to prevent re-claiming
+All settings are now in one clean file:
 
-## Configuration (since 0.1.3-beta)
-
-You can now customize behavior with a simple JSON config.
-
-Example (`data/config.json`):
+**`data/config.json`**
 
 ```json
 {
-  "game": "Rust",
-  "autostart": true
+  "games_path": "./lists/games.txt",
+  "autostart": false,
+  "proxies_path": "./lists/proxies.txt"
 }
 ```
 
-- `"game"`: If set to a non-empty string, the tool **skips the interactive menu** and immediately starts farming drops for that game.
-- `"autostart"`: If `true`, the miner registers itself as a system startup application and launches automatically with Windows/Linux.
+### What the program does automatically
 
-## 💻 Available Binaries
+- On first launch it creates the `lists/` folder and the necessary files inside
+- You can point it to your own custom paths if you prefer
 
-Pre-compiled executables are provided for the most common platforms:
+### `lists/games.txt` (priority from top to bottom)
 
-- **Windows** — `x86_64` `.exe`
-- **Linux** — `x86_64` ELF executable
+```txt
+THE FINALS
+Marvel Rivals
+Warhammer 40,000: Darktide
+Rust
+Valorant
+```
 
-## Data Storage & Important Disclaimer
+**The higher the game is in the list — the higher its priority.**  
+The tool will first try to find a stream for the top game, then the next, and so on.
 
-All account credentials, sessions, and claim data are stored in **plain JSON files** inside the `data/` folder.
+### `lists/proxies.txt` (one proxy per line)
 
-**We are not responsible** for:
-- Any data leaks
-- Twitch account bans due to suspicious activity
-- Any other consequences of using this tool
+```txt
+socks5://user:pass@123.45.67.89:1080
+http://192.168.0.1:8080
+socks5://2esfs:323e@192.168.0.1:8000
+```
 
-**Use at your own risk.** Never run this on your main/primary accounts with valuable data.
+Fully supports HTTP and SOCKS5 (with or without authentication).
 
-## 🐞 Found a Bug?
+## How It Works
 
-This beta version is heavily focused on multi-account stability.  
-If you encounter **any** crashes, errors, or unexpected behavior (especially with multiple accounts), please **open an Issue** immediately. Your feedback is crucial.
+1. Logs into **all** configured Twitch accounts  
+2. Fetches current Drop campaigns  
+3. For each account picks the highest-priority eligible game  
+4. Finds the best live stream for that game  
+5. Emulates real viewing via official Twitch GQL  
+6. Shows beautiful real-time progress for every account  
+7. Automatically claims drops and saves history to prevent duplicates
 
-## 🎉 Did you like the project?
+## 📥 Installation
 
-If Drop_Sentry is useful to you, please consider **starring the repository** ⭐  
-It really helps the project grow and motivates further development.
+**Pre-built binaries:**
+
+- **Windows** → `twitchdrops_miner.exe` (x86_64)
+- **Linux** → `twitchdrops_miner` (x86_64 ELF)
+
+## 💾 Data & Security
+
+All sessions and data are stored as plain JSON files in the `data/` folder.  
+**Recommendation:** Use farming-only accounts and always enable proxies.
+
+We are not responsible for bans or data leaks — use at your own risk.
+
+## 🐞 Bug Reports
+
+Found a bug (critical or minor)? Open an **Issue** right away.  
+Every report helps make the project even better.
+
+## ⭐ Support the Project
+
+If DropSentry is helping you farm drops, please drop a **star** ⭐  
+It’s the best motivation to keep pushing updates.
 
 ## ❤️ Support the Developer
 
 <div align="center">
-
-[![DonationAlerts](https://www.donationalerts.com/img/brand/donationalerts.svg)](https://www.donationalerts.com/r/this_is_really)
-
-**[Boosty](https://boosty.to/this-is-really)**
-
-Your support greatly accelerates development and helps ensure long-term maintenance of the project.
-
+  <a href="https://www.donationalerts.com/r/this_is_really">
+    <img src="https://www.donationalerts.com/img/brand/donationalerts.svg" height="45">
+  </a>
+  <br><br>
+  <a href="https://boosty.to/this-is-really">Boosty</a>
 </div>
+
+---
+
+**Made with ❤️ for the Twitch community**  
+**License:** [MIT](LICENSE)  
+**Version:** 1.0.0 Stable

@@ -2323,7 +2323,7 @@ dependencies = [
 
 [[package]]
 name = "twitchdrops_miner"
-version = "0.1.3-beta"
+version = "1.0.0"
 dependencies = [
  "auto-launch",
  "dialoguer",
