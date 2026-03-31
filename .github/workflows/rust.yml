@@ -1,0 +1,146 @@
+name: Dev Build
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+permissions:
+  contents: write
+env:
+  BINARY_NAME: twitchdrops_miner
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            artifact_name: linux-x86_64
+            binary_suffix: linux-x86_64
+          - os: ubuntu-24.04
+            target: aarch64-unknown-linux-musl
+            artifact_name: linux-aarch64
+            binary_suffix: linux-aarch64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact_name: windows-x86_64
+            binary_suffix: windows-x86_64.exe
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact_name: macos-aarch64
+            binary_suffix: macos-aarch64
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact_name: macos-x86_64
+            binary_suffix: macos-x86_64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross (for musl targets)
+        if: contains(matrix.target, 'musl')
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: |
+          if [[ "${{ contains(matrix.target, 'musl') }}" == "true" ]]; then
+            cargo clean --target ${{ matrix.target }} || true
+            RUSTFLAGS="-C target-feature=+crt-static" \
+              cross build --release --target ${{ matrix.target }} --locked
+          else
+            cargo build --release --target ${{ matrix.target }} --locked
+          fi
+        shell: bash
+
+      - name: Install aarch64 binutils (для strip)
+        if: matrix.target == 'aarch64-unknown-linux-musl'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y binutils-aarch64-linux-gnu
+        shell: bash
+
+      - name: Strip binary
+        if: runner.os == 'Linux'
+        run: |
+          if [[ "${{ matrix.target }}" == "aarch64-unknown-linux-musl" ]]; then
+            aarch64-linux-gnu-strip "target/${{ matrix.target }}/release/${{ env.BINARY_NAME }}"
+          else
+            strip "target/${{ matrix.target }}/release/${{ env.BINARY_NAME }}"
+          fi
+        shell: bash
+
+      - name: Prepare binary
+        run: |
+          mkdir -p artifacts
+          cp "target/${{ matrix.target }}/release/${{ env.BINARY_NAME }}${{ matrix.os == 'windows-latest' && '.exe' || '' }}" "artifacts/${{ env.BINARY_NAME }}-${{ matrix.binary_suffix }}"
+        shell: bash
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: artifacts/${{ env.BINARY_NAME }}-${{ matrix.binary_suffix }}
+          if-no-files-found: error
+
+  release:
+    name: Publish to dev-build release
+    needs: build
+    runs-on: ubuntu-24.04
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Delete old dev-build release
+        run: gh release delete dev-build --yes || true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Force update dev-build tag
+        run: |
+          git tag -f dev-build
+          git push -f origin dev-build
+
+      - name: Prepare release notes
+        run: |
+          echo "**This is an automatic development build** generated from the latest commit on the \`main\` branch." > notes.md
+          echo "⚠️ **Warning**: This version is built automatically and has not undergone full manual testing. Use it only for testing purposes." >> notes.md
+          echo "### What's included:" >> notes.md
+          echo "- Latest changes from the repository" >> notes.md
+          echo "- Built for Linux, Windows and macOS" >> notes.md
+          echo "**Do not use in production.**" >> notes.md
+          echo "---" >> notes.md
+          echo "Commit: ${{ github.sha }}" >> notes.md
+          echo "Built on: $(date -u +'%Y-%m-%d %H:%M:%S UTC')" >> notes.md
+        shell: bash
+
+      - name: Create/Update Development build release
+        run: |
+          gh release create dev-build \
+            --title "Development build" \
+            --prerelease \
+            --notes-file notes.md
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload artifacts
+        run: gh release upload dev-build artifacts/* --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
