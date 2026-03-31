@@ -9,6 +9,7 @@ pub struct Config {
     games_path: String,
     autostart: bool,
     proxies_path: String,
+    pub discord_webhook_url: String,
 }
 
 async fn open_lines (path: &str) -> Result<Lines<BufReader<File>>, Box<dyn Error>> {
@@ -66,7 +67,14 @@ impl Config {
             fs::write(&proxies_path, "".as_bytes()).await?;
         }
 
-        Ok(Config { games_path: "./lists/games.txt".to_string(), autostart: false, proxies_path: "./lists/proxies.txt".to_string() })
+        Ok(
+            Config { 
+                games_path: "./lists/games.txt".to_string(), 
+                autostart: false, 
+                proxies_path: "./lists/proxies.txt".to_string(),
+                discord_webhook_url: String::new()
+            }
+        )
     }
 
     pub async fn save (&self, path: &Path) -> Result<(), Box<dyn Error>> {

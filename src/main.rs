@@ -1,7 +1,7 @@
 use std::{collections::{BTreeMap, HashMap, HashSet, VecDeque}, error::Error, path::{Path, PathBuf}, sync::Arc, time::Duration};
 
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use rand::{rng, seq::SliceRandom};
+use rand::{rng, seq::{IndexedRandom, SliceRandom}};
 use tokio::{fs::{self}, sync::{Notify, broadcast::{self, Receiver, error::TryRecvError}, watch::Sender}, time::{sleep}};
 use tracing::{info};
 use tracing_appender::rolling;
@@ -11,16 +11,20 @@ use twitch_gql_rs::{TwitchClient, client_type::ClientType, error::ClaimDropError
 mod r#static;
 mod stream;
 mod config;
+mod webhook;
 
-use crate::{r#static::*, stream::*, config::*};
+use crate::{config::*, r#static::*, stream::*, webhook::{WebhookSendFormat, webhook_message_sync}};
 
 const STREAM_SLEEP: u64 = 20;
 const MAX_COUNT: u64 = 3;
 
-async fn create_client (home_dir: &Path) -> Result<(), Box<dyn Error>> {
+async fn create_client (home_dir: &Path, proxies: &Vec<String>) -> Result<(), Box<dyn Error>> {
+    let random_proxy = proxies.choose(&mut rng()).cloned();
+
     let client_type = ClientType::android_app();
-    let mut client = TwitchClient::new(&client_type, &None).await?;
+    let mut client = TwitchClient::new(&client_type, &random_proxy).await?;
     let mut count = 0;
+
     loop {
         count += 1;
         if count >= MAX_COUNT {
@@ -47,7 +51,7 @@ async fn create_client (home_dir: &Path) -> Result<(), Box<dyn Error>> {
     if !path.exists() {
         client.save_file(&path).await?;
     }
-    let client = TwitchClient::load_from_file(&path, &None).await?;
+    let client = TwitchClient::load_from_file(&path, &random_proxy).await?;
     let login = client.login.clone().unwrap_or_default();
 
     let mut accounts = ACCOUNTS.lock().await;
@@ -122,7 +126,7 @@ async fn main () -> Result<(), Box<dyn Error>> {
 
         match select {
             0 => {
-                create_client(&home_dir).await.unwrap()
+                create_client(&home_dir, &proxies).await.unwrap()
             },
             1 => {
                 let clients = ACCOUNTS.lock().await;
@@ -152,14 +156,14 @@ async fn main () -> Result<(), Box<dyn Error>> {
                     grouped.entry(idx).or_default().push_front(obj);
                 }
 
-                main_logic(client, grouped, home_dir, &games).await?;
+                main_logic(client, grouped, home_dir, &games, config.discord_webhook_url.clone(), &proxies).await?;
             },
             _ => {}
         } 
     }
 }
 
-async fn main_logic (client: Arc<TwitchClient> ,grouped: BTreeMap<usize, VecDeque<DropCampaigns>>, home_dir: &Path, games: &VecDeque<String>) -> Result<(), Box<dyn Error>> {
+async fn main_logic (client: Arc<TwitchClient> ,grouped: BTreeMap<usize, VecDeque<DropCampaigns>>, home_dir: &Path, games: &VecDeque<String>, webhook_url: String, proxies: &Vec<String>) -> Result<(), Box<dyn Error>> {
     let current_campaigns: VecDeque<VecDeque<DropCampaigns>> = if !games.is_empty() {
         games.iter().filter_map(|game_name| {
             let campaigns_for_game: VecDeque<_> = grouped.values().flat_map(|campaigns_vec| {
@@ -187,14 +191,14 @@ async fn main_logic (client: Arc<TwitchClient> ,grouped: BTreeMap<usize, VecDequ
         return Err("No campaigns found for the selected game")?;
     }
 
-    let (tx_watch, mut rx_watch) = tokio::sync::watch::channel(String::new());
-    let drop_campaigns = Arc::new(current_campaigns.clone());
-    
-    let drop_cash_dir = home_dir.join("cash.json");
+    let (webhook_tx, webhook_rx) = tokio::sync::mpsc::channel(100);
+    let (drop_id_tx, mut drop_id_rx) = tokio::sync::watch::channel(String::new());
+    let (channel_tx, channel_rx) = broadcast::channel(100);
+    let rx2 = channel_tx.subscribe();
 
-    let (tx, rx1) = broadcast::channel(100);
-    let rx2 = tx.subscribe();
     let notify = Arc::new(Notify::new());
+    let drop_campaigns = Arc::new(current_campaigns.clone());
+    let drop_cash_dir = home_dir.join("cash.json");
 
     let clients = ACCOUNTS.lock().await;
     let clients = if let Some(accounts) = clients.clone() {
@@ -203,13 +207,16 @@ async fn main_logic (client: Arc<TwitchClient> ,grouped: BTreeMap<usize, VecDequ
         return Err("Didn't find accounts")?;
     };
 
-    watch_sync(clients.clone(), rx1, notify.clone()).await;
+    if !webhook_url.is_empty() {
+        webhook_message_sync(webhook_url, webhook_rx, &proxies).await
+    }
+    watch_sync(clients.clone(), channel_rx, notify.clone()).await;
     info!("Watch synchronization task has been successfully initiated");
-    drop_sync(clients.clone(), tx_watch, drop_cash_dir, rx2, notify.clone()).await;
+    drop_sync(clients.clone(), drop_id_tx, drop_cash_dir, rx2, notify.clone(), webhook_tx).await;
     info!("Drop progress tracker is active");
     filter_streams(client.clone(), drop_campaigns.clone()).await;
     info!("Stream filtering has begun");
-    update_stream(tx, notify).await;
+    update_stream(channel_tx, notify).await;
     info!("Stream priority updated");
 
     let mut pending_drops: HashSet<String> = HashSet::new();
@@ -234,8 +241,8 @@ async fn main_logic (client: Arc<TwitchClient> ,grouped: BTreeMap<usize, VecDequ
     }
 
     while !pending_drops.is_empty() {
-        rx_watch.changed().await.ok();
-        let drop_id = rx_watch.borrow().clone();
+        drop_id_rx.changed().await.ok();
+        let drop_id = drop_id_rx.borrow().clone();
         if !drop_id.is_empty() && pending_drops.remove(&drop_id) {
             info!("Drop {} processed (remaining: {})", drop_id, pending_drops.len());
         }
@@ -292,7 +299,7 @@ async fn watch_sync (clients: Vec<Arc<TwitchClient>>, rx: Receiver<Channel>, not
     }
 }
 
-async fn drop_sync(clients: Vec<Arc<TwitchClient>>, tx: Sender<String>, cash_path: PathBuf, rx_watch: broadcast::Receiver<Channel>, notify: Arc<Notify>) {
+async fn drop_sync(clients: Vec<Arc<TwitchClient>>, tx: Sender<String>, cash_path: PathBuf, rx_watch: broadcast::Receiver<Channel>, notify: Arc<Notify>, webhook_tx: tokio::sync::mpsc::Sender<WebhookSendFormat>) {
     if !cash_path.exists() {
         retry!(fs::write(&cash_path, "{}"));
     } else {
@@ -309,11 +316,13 @@ async fn drop_sync(clients: Vec<Arc<TwitchClient>>, tx: Sender<String>, cash_pat
         let mut rx_watch = rx_watch.resubscribe();
         let notify = notify.clone();
         let tx = tx.clone();
+        let webhook_tx = webhook_tx.clone();
         let cash_path = cash_path.clone();
         let bars = bars.clone();
 
         tokio::spawn(async move {
             let mut last_claimed = String::new();
+            let mut last_message = String::new();
 
             //bar
             let bar = bars.add(ProgressBar::new(1));
@@ -363,6 +372,44 @@ async fn drop_sync(clients: Vec<Arc<TwitchClient>>, tx: Sender<String>, cash_pat
                 } else {
                     "Watching"
                 };
+
+                if last_message != message {
+                    let progress_percent = if drop_progress.requiredMinutesWatched > 0 {
+                        ((drop_progress.currentMinutesWatched as f64 / drop_progress.requiredMinutesWatched as f64) * 100.0) as u8
+                    } else { 0 };
+
+                    let progress_text = format!("{}m / {}m", drop_progress.currentMinutesWatched, drop_progress.requiredMinutesWatched);
+
+                    let (game_name, game_avatar_url) = if drop_progress.dropID.is_empty() {
+                        ("None".to_string(), "None".to_string())
+                    } else {
+                        let inv = retry!(client.get_inventory());
+                        if let Some(found) = inv.inventory.dropCampaignsInProgress.as_ref().and_then(|campaigns| {
+                            campaigns.iter().find(|campaign| {
+                                campaign.timeBasedDrops.iter().any(|time_based| {
+                                    time_based.id == drop_progress.dropID
+                                })
+                            })
+                        }) {
+                            (found.game.name.clone(), found.imageURL.clone())   
+                        } else {
+                            (drop_progress.game.map(|game| game.displayName).unwrap_or_else(|| "Unknown".to_string()), "None".to_string())
+                        }
+                    };
+
+                    let payload = WebhookSendFormat {
+                        twitch_name: client.login.clone().unwrap_or("undefined".to_string()),
+                        game_name,
+                        game_avatar_url,
+                        streamer_name: watching.channel_login.clone(),
+                        progress_percent,
+                        progress_text,
+                        status: message.to_string()
+                    };
+                    webhook_tx.send(payload).await.unwrap();
+                }
+
+                last_message = message.to_string();
 
                 let message = format!("{} | {}", client.login.clone().unwrap_or_default(), message);
             
