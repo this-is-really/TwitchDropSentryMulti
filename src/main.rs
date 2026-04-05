@@ -12,8 +12,9 @@ mod r#static;
 mod stream;
 mod config;
 mod webhook;
+mod web;
 
-use crate::{config::*, r#static::*, stream::*, webhook::{WebhookSendFormat, webhook_message_sync}};
+use crate::{config::*, r#static::*, stream::*, web::start_api, webhook::{WebhookSendFormat, webhook_message_sync}};
 
 const STREAM_SLEEP: u64 = 20;
 const MAX_COUNT: u64 = 3;
@@ -75,6 +76,9 @@ async fn create_client (home_dir: &Path, proxies: &Vec<String>) -> Result<(), Bo
 
 #[tokio::main]
 async fn main () -> Result<(), Box<dyn Error>> {
+    tokio::spawn(async {
+        start_api().await
+    });
     let file_appender = rolling::never(".", "app.log");
     tracing_subscriber::fmt().with_writer(BoxMakeWriter::new(file_appender)).with_ansi(false).init();
     let home_dir = Path::new("data");
@@ -116,51 +120,32 @@ async fn main () -> Result<(), Box<dyn Error>> {
 
     let games = config.loaded_games().await?;
 
-    let items = vec!["Add account", "Start farming"];
-    loop {
-        let select = if !games.is_empty() {
-            1
-        } else {
-            dialoguer::Select::new().with_prompt("Select option").items(&items).default(0).interact()?
-        };
+    let clients = ACCOUNTS.lock().await;
+    let client = if let Some(accounts) = clients.clone() {
+        accounts.first().cloned().unwrap()
+    } else {
+        return Err("Didn't find accounts")?;
+    };
+    drop(clients);
 
-        match select {
-            0 => {
-                create_client(&home_dir, &proxies).await.unwrap()
-            },
-            1 => {
-                let clients = ACCOUNTS.lock().await;
-                let client = if let Some(accounts) = clients.clone() {
-                    accounts.first().cloned().unwrap()
-                } else {
-                    return Err("Didn't find accounts")?;
-                };
-                drop(clients);
-
-                let campaign = client.get_campaign().await?;
-                let campaign = campaign.dropCampaigns;
-
-                let mut id_to_index = HashMap::new();
-                let mut grouped: BTreeMap<usize, VecDeque<DropCampaigns>> = BTreeMap::new();
-                let mut next_index: usize = 0;
-                for obj in campaign {
-                    if obj.status == "EXPIRED" {
-                        continue;
-                    }
-                    let idx = *id_to_index.entry(obj.game.id.clone()).or_insert_with(|| {
-                        let i = next_index;
-                        next_index += 1;
-                        i
-                    });
-
-                    grouped.entry(idx).or_default().push_front(obj);
-                }
-
-                main_logic(client, grouped, home_dir, &games, config.discord_webhook_url.clone(), &proxies).await?;
-            },
-            _ => {}
-        } 
+    let campaign = client.get_campaign().await?;
+    let campaign = campaign.dropCampaigns;
+    let mut id_to_index = HashMap::new();
+    let mut grouped: BTreeMap<usize, VecDeque<DropCampaigns>> = BTreeMap::new();
+    let mut next_index: usize = 0;
+    for obj in campaign {
+        if obj.status == "EXPIRED" {
+            continue;
+        }
+        let idx = *id_to_index.entry(obj.game.id.clone()).or_insert_with(|| {
+            let i = next_index;
+            next_index += 1;
+            i
+        });
+        grouped.entry(idx).or_default().push_front(obj);
     }
+    main_logic(client, grouped, home_dir, &games, config.discord_webhook_url.clone(), &proxies).await?; 
+    Ok(())
 }
 
 async fn main_logic (client: Arc<TwitchClient> ,grouped: BTreeMap<usize, VecDeque<DropCampaigns>>, home_dir: &Path, games: &VecDeque<String>, webhook_url: String, proxies: &Vec<String>) -> Result<(), Box<dyn Error>> {
