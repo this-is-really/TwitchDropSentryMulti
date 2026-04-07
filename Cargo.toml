@@ -22,3 +22,6 @@ rand = "0.10.0"
 chrono = "0.4.44"
 axum = "0.8.8"
 tower-http = { version = "0.6", features = ["fs", "trace", "cors"] }
+axum-embed = "0.1.0"
+rust-embed = { version = "8.11.0", features = ["include-exclude"] }
+sysinfo = "0.38.4"

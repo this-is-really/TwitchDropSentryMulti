@@ -3,19 +3,20 @@ import '@mantine/core/styles.css';
 import { Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import Dashboard from './pages/Dashboard';
 import Settings from './pages/Settings';
-import Perfomance from './pages/Perfomance';
+import Performance from './pages/Performance';
 
 function App() {
   const navigate = useNavigate();
   const location = useLocation();
   return(
-    <AppShell navbar={{ width: 250, breakpoint: "sm" }} padding="md" header={{ height: 36 }}>
+    <AppShell navbar={{ width: 250, breakpoint: "sm" }} padding="md" withBorder={false}>
 
       <AppShell.Navbar p="md" styles={{ navbar: {
-        height: rem(800),
-        maxHeight: rem(400),
-        top: 'auto',
+        height: 'auto',
+        top: '50%',
+        transform: 'translateY(-50%)',
         bottom: 'auto',
+        position: "fixed",
         left: rem(10),
         borderRadius: rem(16),
         overflow: 'hidden',
@@ -43,9 +44,9 @@ function App() {
           />
 
           <NavLink 
-            label="Perfomance"
-            active={location.pathname === "/perfomance"}
-            onClick={() => navigate("/perfomance")}
+            label="Performance"
+            active={location.pathname === "/performance"}
+            onClick={() => navigate("/performance")}
             styles={ (theme) => ({
               root: {
                 borderRadius: theme.radius.md,
@@ -71,7 +72,7 @@ function App() {
         <Routes>
           <Route path="/" element={<Dashboard />} />
           <Route path="/settings" element={<Settings />} />
-          <Route path="/perfomance" element={<Perfomance />} />
+          <Route path="/performance" element={<Performance />} />
         </Routes>
       </AppShell.Main>
     </AppShell>
