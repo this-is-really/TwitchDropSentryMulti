@@ -4,7 +4,7 @@ use auto_launch::AutoLaunchBuilder;
 use serde::{Deserialize, Serialize};
 use tokio::{fs::{self, File}, io::{AsyncBufReadExt, BufReader, Lines}};
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
     games_path: String,
     autostart: bool,
@@ -91,32 +91,101 @@ impl Config {
         Ok(config)
     }
 
+
+    //proxies
     pub async fn load_proxies_list (&self) -> Result<Vec<String>, Box<dyn Error>> {
         let mut reader = open_lines(&self.proxies_path).await?;
         
         let mut proxies = Vec::new();
 
         while let Some(line) = reader.next_line().await? {
-            let trimmed = line.trim();
+            let trimmed = line.trim().trim_start_matches("\u{feff}");
             if !trimmed.is_empty() {
-                proxies.push(line);
+                proxies.push(trimmed.to_string());
             }
         }
         Ok(proxies)
     }
 
+    pub async fn add_proxy(&self, proxy: &str) -> Result<(), Box<dyn Error>> {
+        let path = Path::new(&self.proxies_path);
+        let mut proxies = self.load_proxies_list().await?;
+        proxies.push(proxy.trim().to_string());
+
+        let new_content = proxies.join("\n") + "\n";
+        fs::write(&path, new_content).await?;
+        Ok(())
+    }
+
+    pub async fn delete_proxy(&self, proxy: &str) -> Result<(), Box<dyn Error>> {
+        let path = Path::new(&self.proxies_path);
+        let mut proxies = self.load_proxies_list().await?;
+
+        if let Some(pos) = proxies.iter().position(|p| p == proxy) {
+            proxies.remove(pos);
+        }
+
+        let new_content = proxies.join("\n") + "\n";
+        fs::write(&path, new_content).await?;
+        Ok(())
+    }
+
+
+    //game
     pub async fn loaded_games (&self) -> Result<VecDeque<String>, Box<dyn Error>> {
-    let mut reader = open_lines(&self.games_path).await?;
+        let mut reader = open_lines(&self.games_path).await?;
 
         let mut games = VecDeque::new();
 
         while let Some(line) = reader.next_line().await? {
             let trimmed = line.trim().trim_start_matches("\u{feff}");
             if !trimmed.is_empty() {
-                games.push_back(line);
+                games.push_back(trimmed.to_string());
             }
         }
         Ok(games)
+    }
+
+    pub async fn add_game(&self, game_name: &str) -> Result<usize, Box<dyn Error>> {
+        let path = Path::new(&self.games_path);
+
+        let mut games = self.loaded_games().await?;
+        let position = games.len();
+        games.push_back(game_name.trim().to_string());
+
+        let new_content = games.make_contiguous().join("\n") + "\n";
+        fs::write(&path, new_content).await?;
+        Ok(position)
+    }
+
+    pub async fn reorder_game(&self, game_name: &str, new_position: usize) -> Result<(), Box<dyn Error>> {
+        let path = Path::new(&self.games_path);
+        
+        let mut games = self.loaded_games().await?;
+        
+        let target_name = game_name.trim();
+        if let Some(old_pos) = games.iter().position(|g| g == target_name) {
+            games.remove(old_pos);
+        }
+
+        let insert_pos = new_position.min(games.len());
+        games.insert(insert_pos, target_name.to_string());
+
+        let new_content = games.make_contiguous().join("\n") + "\n";
+        fs::write(&path, new_content).await?;
+        Ok(())
+    }
+
+    pub async fn delete_game(&self, pos: usize) -> Result<(), Box<dyn Error>> {
+        let path = Path::new(&self.games_path);
+
+        let mut games = self.loaded_games().await?;
+
+        games.remove(pos);
+
+        let new_content = games.make_contiguous().join("\n") + "\n";
+        fs::write(&path, new_content).await?;
+        Ok(())
     }
 }
 

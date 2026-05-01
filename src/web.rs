@@ -1,6 +1,6 @@
 use std::{error::Error, net::{SocketAddr}};
 
-use axum::{Json, Router, routing::get};
+use axum::{Json, Router, extract::State, routing::{delete, get, post}};
 use axum_embed::ServeEmbed;
 use serde::Serialize;
 use serde_json::json;
@@ -9,14 +9,28 @@ use tokio::net::TcpListener;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use rust_embed::RustEmbed;
 
+use crate::config::Config;
+
 #[derive(RustEmbed, Clone)]
 #[folder = "./web/DropSentry/dist"]
 #[include = "*"]
 struct FrontendAssets;
 
-pub async fn start_api () -> Result<(), Box<dyn Error + Send + Sync>> {
+#[derive(Clone)]
+pub struct AppState {
+    pub config: Config,
+}
+
+pub async fn start_api (state: AppState) -> Result<(), Box<dyn Error>> {
     let api_routes = Router::new()
-        .route("/performance", get(performance));
+        .route("/performance", get(performance))
+        .route("/games", get(get_games))
+        .route("/games", post(add_game))
+        .route("/games", delete(delete_game))
+        .route("/games/reorder", post(reorder_game))
+        .route("/proxies", get(get_proxies))
+        .route("/proxies", post(add_proxy))
+        .route("/proxies", delete(delete_proxy));   
 
     let frontend_service = ServeEmbed::<FrontendAssets>::new();
 
@@ -24,7 +38,8 @@ pub async fn start_api () -> Result<(), Box<dyn Error + Send + Sync>> {
         .nest("/api", api_routes)
         .fallback_service(frontend_service)
         .layer(CorsLayer::permissive())
-        .layer(TraceLayer::new_for_http());
+        .layer(TraceLayer::new_for_http())
+        .with_state(state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], 8080));
     println!("http://{}", addr);
@@ -33,6 +48,8 @@ pub async fn start_api () -> Result<(), Box<dyn Error + Send + Sync>> {
     Ok(())
 }
 
+
+//performance
 #[derive(Serialize)]
 struct SystemInfo {
     total_memory: u64,
@@ -57,4 +74,60 @@ async fn performance () -> Json<SystemInfo> {
     };
     
     Json(SystemInfo { total_memory: sys.total_memory(), process_memory, cpu_name, cpu_usage })
+}
+
+//game
+#[derive(Serialize)]
+pub struct Game {
+    pub name: String,
+    pub position: usize,
+}
+
+async fn get_games(State(state): State<AppState>) -> Result<Json<Vec<Game>>, axum::http::StatusCode> {
+    let games = state.config.loaded_games().await.map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    let games: Vec<Game> = games.into_iter().enumerate().map(|(index, name)| Game {
+        name,
+        position: index
+    }).collect();
+    Ok(Json(games))
+}
+
+async fn add_game(State(state): State<AppState>, Json(payload): Json<serde_json::Value>) -> Json<Game> {
+    let name = payload["name"].as_str().unwrap_or_default().to_string();
+    let position = state.config.add_game(&name).await.unwrap();
+    Json(Game { name, position })
+}
+
+async fn reorder_game(State(state): State<AppState>, Json(payload): Json<serde_json::Value>) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let game_name = payload["game_name"].as_str().unwrap_or_default().to_string();
+    let new_position = payload["position"].as_u64().unwrap_or(1) as usize;
+
+    state.config.reorder_game(&game_name, new_position).await.map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(serde_json::json!({"status": "ok"})))
+}
+
+async fn delete_game(State(state): State<AppState>, Json(payload): Json<serde_json::Value>) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let pos = payload["position"].as_u64().unwrap_or(1) as usize;
+    state.config.delete_game(pos).await.map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(serde_json::json!({"status": "ok"})))
+}
+
+//proxies
+async fn get_proxies(State(state): State<AppState>) -> Result<Json<Vec<String>>, axum::http::StatusCode> {
+    let proxies = state.config.load_proxies_list().await.map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(proxies))
+}
+
+async fn add_proxy(State(state): State<AppState>, Json(payload): Json<serde_json::Value>) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let url = payload["url"].as_str().unwrap_or_default().to_string();
+    state.config.add_proxy(&url).await.map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(json!({ "url": url })))
+}
+
+async fn delete_proxy(State(state): State<AppState>, Json(payload): Json<serde_json::Value>) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let proxy = payload["url"].as_str().unwrap_or_default().to_string();
+    state.config.delete_proxy(&proxy).await.map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(serde_json::json!({ "status": "ok" })))
 }

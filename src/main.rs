@@ -14,7 +14,7 @@ mod config;
 mod webhook;
 mod web;
 
-use crate::{config::*, r#static::*, stream::*, web::start_api, webhook::{WebhookSendFormat, webhook_message_sync}};
+use crate::{config::*, r#static::*, stream::*, web::{AppState, start_api}, webhook::{WebhookSendFormat, webhook_message_sync}};
 
 const STREAM_SLEEP: u64 = 20;
 const MAX_COUNT: u64 = 3;
@@ -76,11 +76,6 @@ async fn create_client (home_dir: &Path, proxies: &Vec<String>) -> Result<(), Bo
 
 #[tokio::main]
 async fn main () -> Result<(), Box<dyn Error>> {
-    tokio::spawn(async {
-        start_api().await
-    });
-    let file_appender = rolling::never(".", "app.log");
-    tracing_subscriber::fmt().with_writer(BoxMakeWriter::new(file_appender)).with_ansi(false).init();
     let home_dir = Path::new("data");
     if !home_dir.exists() {
         fs::create_dir_all(&home_dir).await?;
@@ -94,6 +89,11 @@ async fn main () -> Result<(), Box<dyn Error>> {
 
     let config = Config::load(&config_path).await?;
     config.configure_autostart()?;
+
+    start_api(AppState { config: config.clone() }).await?;
+
+    let file_appender = rolling::never(".", "app.log");
+    tracing_subscriber::fmt().with_writer(BoxMakeWriter::new(file_appender)).with_ansi(false).init();
 
     let mut proxies = config.load_proxies_list().await?;
 
