@@ -1,4 +1,4 @@
-use std::{error::Error, net::{SocketAddr}};
+use std::{error::Error, net::SocketAddr, path::PathBuf};
 
 use axum::{Json, Router, extract::State, routing::{delete, get, post}};
 use axum_embed::ServeEmbed;
@@ -9,7 +9,7 @@ use tokio::net::TcpListener;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use rust_embed::RustEmbed;
 
-use crate::config::Config;
+use crate::{config::Config, create_client};
 
 #[derive(RustEmbed, Clone)]
 #[folder = "./web/DropSentry/dist"]
@@ -19,6 +19,7 @@ struct FrontendAssets;
 #[derive(Clone)]
 pub struct AppState {
     pub config: Config,
+    pub home_dir: PathBuf,
 }
 
 pub async fn start_api (state: AppState) -> Result<(), Box<dyn Error>> {
@@ -30,7 +31,8 @@ pub async fn start_api (state: AppState) -> Result<(), Box<dyn Error>> {
         .route("/games/reorder", post(reorder_game))
         .route("/proxies", get(get_proxies))
         .route("/proxies", post(add_proxy))
-        .route("/proxies", delete(delete_proxy));   
+        .route("/proxies", delete(delete_proxy))
+        .route("/create_client", post(create_new_client));   
 
     let frontend_service = ServeEmbed::<FrontendAssets>::new();
 
@@ -130,4 +132,11 @@ async fn delete_proxy(State(state): State<AppState>, Json(payload): Json<serde_j
     let proxy = payload["url"].as_str().unwrap_or_default().to_string();
     state.config.delete_proxy(&proxy).await.map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(serde_json::json!({ "status": "ok" })))
+}
+
+//dashbroad
+async fn create_new_client(State(state): State<AppState>) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let proxies = state.config.load_proxies_list().await.map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    create_client(&state.home_dir, &proxies).await.map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(serde_json::json!({"status": "ok"})))
 }

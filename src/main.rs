@@ -89,9 +89,6 @@ async fn main () -> Result<(), Box<dyn Error>> {
 
     let config = Config::load(&config_path).await?;
     config.configure_autostart()?;
-
-    start_api(AppState { config: config.clone() }).await?;
-
     let file_appender = rolling::never(".", "app.log");
     tracing_subscriber::fmt().with_writer(BoxMakeWriter::new(file_appender)).with_ansi(false).init();
 
@@ -144,6 +141,8 @@ async fn main () -> Result<(), Box<dyn Error>> {
         });
         grouped.entry(idx).or_default().push_front(obj);
     }
+
+    start_api(AppState { config: config.clone(), home_dir: home_dir.to_path_buf() }).await?;
     main_logic(client, grouped, home_dir, &games, config.discord_webhook_url.clone(), &proxies).await?; 
     Ok(())
 }
