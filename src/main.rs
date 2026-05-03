@@ -5,7 +5,7 @@ use rand::{rng, seq::{IndexedRandom, SliceRandom}};
 use tokio::{fs::{self}, sync::{Notify, broadcast::{self, Receiver, error::TryRecvError}, watch::Sender}, time::{sleep}};
 use tracing::{info};
 use tracing_appender::rolling;
-use tracing_subscriber::fmt::writer::BoxMakeWriter;
+use tracing_subscriber::fmt::{time::ChronoLocal, writer::BoxMakeWriter};
 use twitch_gql_rs::{TwitchClient, client_type::ClientType, error::ClaimDropError, structs::DropCampaigns};
 
 mod r#static;
@@ -76,7 +76,7 @@ async fn create_client (home_dir: &Path, proxies: &Vec<String>) -> Result<(), Bo
 #[tokio::main]
 async fn main () -> Result<(), Box<dyn Error>> {
     let file_appender = rolling::never(".", "app.log");
-    tracing_subscriber::fmt().with_writer(BoxMakeWriter::new(file_appender)).with_ansi(false).init();
+    tracing_subscriber::fmt().with_writer(BoxMakeWriter::new(file_appender)).with_ansi(false).with_timer(ChronoLocal::new("%Y-%m-%d %H:%M:%S%.3f".into())).init();
     let home_dir = Path::new("data");
     if !home_dir.exists() {
         fs::create_dir_all(&home_dir).await?;
