@@ -13,12 +13,12 @@ mod stream;
 mod config;
 mod webhook;
 
-use crate::{config::*, r#static::*, stream::*, webhook::{WebhookSendFormat, webhook_message_sync}};
+use crate::{config::*, r#static::*, stream::*, webhook::{WebhookSendFormat, webhook_message_worker}};
 
 const STREAM_SLEEP: u64 = 20;
 const MAX_COUNT: u64 = 3;
 
-async fn create_client (home_dir: &Path, proxies: &Vec<String>) -> Result<(), Box<dyn Error>> {
+async fn create_client (home_dir: &Path, proxies: &[String]) -> Result<(), Box<dyn Error>> {
     let random_proxy = proxies.choose(&mut rng()).cloned();
 
     let client_type = ClientType::android_app();
@@ -29,7 +29,7 @@ async fn create_client (home_dir: &Path, proxies: &Vec<String>) -> Result<(), Bo
         count += 1;
         if count >= MAX_COUNT {
             tracing::warn!("Authentication failed: maximum retry attempts ({MAX_COUNT}) reached.");
-            break;
+            return Ok(());
         }
         info!("Starting Twitch device authentication (attempt {count}/{MAX_COUNT})");
         let get_auth = client.request_device_auth().await?;
@@ -42,7 +42,7 @@ async fn create_client (home_dir: &Path, proxies: &Vec<String>) -> Result<(), Bo
             },
             Err(twitch_gql_rs::error::AuthError::TwitchError(e)) => {
                 tracing::error!("Twitch returned an error during authentication: {e}");
-                break;
+                return Ok(());
             }
         }
     }
@@ -163,7 +163,7 @@ async fn main () -> Result<(), Box<dyn Error>> {
     }
 }
 
-async fn main_logic (client: Arc<TwitchClient> ,grouped: BTreeMap<usize, VecDeque<DropCampaigns>>, home_dir: &Path, games: &VecDeque<String>, webhook_url: String, proxies: &Vec<String>) -> Result<(), Box<dyn Error>> {
+async fn main_logic (client: Arc<TwitchClient> ,grouped: BTreeMap<usize, VecDeque<DropCampaigns>>, home_dir: &Path, games: &VecDeque<String>, webhook_url: String, proxies: &[String]) -> Result<(), Box<dyn Error>> {
     let current_campaigns: VecDeque<VecDeque<DropCampaigns>> = if !games.is_empty() {
         games.iter().filter_map(|game_name| {
             let campaigns_for_game: VecDeque<_> = grouped.values().flat_map(|campaigns_vec| {
@@ -208,7 +208,7 @@ async fn main_logic (client: Arc<TwitchClient> ,grouped: BTreeMap<usize, VecDequ
     };
 
     if !webhook_url.is_empty() {
-        webhook_message_sync(webhook_url, webhook_rx, &proxies).await
+        webhook_message_worker(webhook_url, webhook_rx, proxies).await
     }
     watch_sync(clients.clone(), channel_rx, notify.clone()).await;
     info!("Watch synchronization task has been successfully initiated");
@@ -221,7 +221,7 @@ async fn main_logic (client: Arc<TwitchClient> ,grouped: BTreeMap<usize, VecDequ
 
     let mut pending_drops: HashSet<String> = HashSet::new();
     {
-        let cash = DROP_CASH.lock().await.clone();
+        let cash = DROP_CACHE.lock().await.clone();
 
         for game_campaign in current_campaigns {
             for campaign in game_campaign {
@@ -303,7 +303,7 @@ async fn drop_sync(clients: Vec<Arc<TwitchClient>>, tx: Sender<String>, cash_pat
     if !cash_path.exists() {
         retry!(fs::write(&cash_path, "{}"));
     } else {
-        let mut cash = DROP_CASH.lock().await;
+        let mut cash = DROP_CACHE.lock().await;
         let cash_str = retry!(fs::read_to_string(&cash_path));
         let cash_vec: HashMap<String, HashSet<String>> = serde_json::from_str(&cash_str).unwrap();
         *cash = cash_vec;
@@ -344,10 +344,11 @@ async fn drop_sync(clients: Vec<Arc<TwitchClient>>, tx: Sender<String>, cash_pat
                     Err(_) => {}
                 }
 
-                let mut cash = DROP_CASH.lock().await;
                 let drop_progress = retry!(client.get_current_drop_progress_on_channel(&watching.channel_login, &watching.channel_id));
 
                 let should_claim = !drop_progress.dropID.is_empty() && drop_progress.currentMinutesWatched >= drop_progress.requiredMinutesWatched && drop_progress.dropID != last_claimed;
+
+                let mut cache = DROP_CACHE.lock().await;
 
                 if should_claim {
                     retry!(claim_drop(&client, &drop_progress.dropID));
@@ -355,15 +356,15 @@ async fn drop_sync(clients: Vec<Arc<TwitchClient>>, tx: Sender<String>, cash_pat
 
                     tx.send(drop_progress.dropID.clone()).unwrap_or_else(|_| tracing::error!("tx closed"));
 
-                    cash.entry(client.user_id.clone().unwrap_or_default()).or_default().insert(drop_progress.dropID.clone());
+                    cache.entry(client.user_id.clone().unwrap_or_default()).or_default().insert(drop_progress.dropID.clone());
 
                     last_claimed = drop_progress.dropID.clone();
 
-                    let cash_string = serde_json::to_string_pretty(&*cash).unwrap();
-                    retry!(fs::write(&cash_path, cash_string.as_bytes()));
+                    let cache_string = serde_json::to_string_pretty(&*cache).unwrap();
+                    retry!(fs::write(&cash_path, cache_string.as_bytes()));
                 }
 
-                drop(cash);
+                drop(cache);
 
                 let message = if drop_progress.dropID.is_empty() {
                     "No active drop • waiting..."
@@ -447,13 +448,10 @@ async fn claim_drop (client: &Arc<TwitchClient>, drop_progress_id: &str) -> Resu
                 for time_based in in_progress.timeBasedDrops {
                     if time_based.id == drop_progress_id {
                         if let Some(id) = time_based.self_drop.dropInstanceID {
-                            loop {
-                                match client.claim_drop(&id).await {
-                                    Ok(_) => return Ok(()),
-                                    Err(ClaimDropError::DropAlreadyClaimed) => return Ok(()),
-                                    Err(e) => tracing::error!("{e}")
-                                }
-                                sleep(Duration::from_secs(5)).await
+                            match client.claim_drop(&id).await {
+                                Ok(_) => return Ok(()),
+                                Err(ClaimDropError::DropAlreadyClaimed) => return Ok(()),
+                                Err(e) => tracing::error!("{e}")
                             }
                         }
                     }

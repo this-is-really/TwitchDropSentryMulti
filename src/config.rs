@@ -113,7 +113,7 @@ impl Config {
         while let Some(line) = reader.next_line().await? {
             let trimmed = line.trim().trim_start_matches("\u{feff}");
             if !trimmed.is_empty() {
-                games.push_back(line);
+                games.push_back(trimmed.to_string());
             }
         }
         Ok(games)

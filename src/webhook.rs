@@ -13,7 +13,7 @@ pub struct WebhookSendFormat {
     pub status: String,
 }
 
-pub async fn webhook_message_sync(wh_url: String, mut info_rx: Receiver<WebhookSendFormat>, proxies: &Vec<String>) {
+pub async fn webhook_message_worker(wh_url: String, mut info_rx: Receiver<WebhookSendFormat>, proxies: &[String]) {
     let random_proxy = proxies.choose(&mut rng());
 
     let client = if let Some(proxy_str) = random_proxy {

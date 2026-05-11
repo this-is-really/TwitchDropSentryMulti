@@ -177,6 +177,7 @@ async fn spawn_ws (auth_token: String) {
                 let channel_ids = CHANNEL_IDS.lock().await;
                 let new_channels: Vec<Channel> = channel_ids.iter().filter(|id| !send_channels.contains(*id)).cloned().collect();
                 let delete_channels: Vec<Channel> = send_channels.iter().filter(|id| !channel_ids.contains(&id)).cloned().collect();
+                drop(channel_ids);
 
                 if !new_channels.is_empty() {
                     let topics: Vec<String> = new_channels.iter().map(|channel| format!("video-playback-by-id.{}", channel.channel_id)).collect();
