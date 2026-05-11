@@ -70,6 +70,9 @@ All settings are now in one clean file:
 }
 ```
 
+**Notifications preview:**  
+![Webhook notifications](assets/webhook.png)
+
 ### What the program does automatically
 - On first launch it creates the `lists/` folder and the necessary files inside
 - You can point it to your own custom paths if you prefer
