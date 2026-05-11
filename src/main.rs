@@ -207,12 +207,16 @@ async fn main_logic (client: Arc<TwitchClient> ,grouped: BTreeMap<usize, VecDequ
         return Err("Didn't find accounts")?;
     };
 
-    if !webhook_url.is_empty() {
-        webhook_message_worker(webhook_url, webhook_rx, proxies).await
-    }
+
+    let weebhook_is_active = if !webhook_url.is_empty() {
+        webhook_message_worker(webhook_url, webhook_rx, proxies).await;
+        true
+    } else {
+        false
+    };
     watch_sync(clients.clone(), channel_rx, notify.clone()).await;
     info!("Watch synchronization task has been successfully initiated");
-    drop_sync(clients.clone(), drop_id_tx, drop_cash_dir, rx2, notify.clone(), webhook_tx).await;
+    drop_sync(clients.clone(), drop_id_tx, drop_cash_dir, rx2, notify.clone(), webhook_tx, weebhook_is_active).await;
     info!("Drop progress tracker is active");
     filter_streams(client.clone(), drop_campaigns.clone()).await;
     info!("Stream filtering has begun");
@@ -299,15 +303,15 @@ async fn watch_sync (clients: Vec<Arc<TwitchClient>>, rx: Receiver<Channel>, not
     }
 }
 
-async fn drop_sync(clients: Vec<Arc<TwitchClient>>, tx: Sender<String>, cash_path: PathBuf, rx_watch: broadcast::Receiver<Channel>, notify: Arc<Notify>, webhook_tx: tokio::sync::mpsc::Sender<WebhookSendFormat>) {
-    if !cash_path.exists() {
-        retry!(fs::write(&cash_path, "{}"));
+async fn drop_sync(clients: Vec<Arc<TwitchClient>>, tx: Sender<String>, cache_path: PathBuf, rx_watch: broadcast::Receiver<Channel>, notify: Arc<Notify>, webhook_tx: tokio::sync::mpsc::Sender<WebhookSendFormat>, webhook_is_active: bool) {
+    if !cache_path.exists() {
+        retry!(fs::write(&cache_path, "{}"));
     } else {
-        let mut cash = DROP_CACHE.lock().await;
-        let cash_str = retry!(fs::read_to_string(&cash_path));
-        let cash_vec: HashMap<String, HashSet<String>> = serde_json::from_str(&cash_str).unwrap();
-        *cash = cash_vec;
-        drop(cash);
+        let mut cache = DROP_CACHE.lock().await;
+        let cache_str = retry!(fs::read_to_string(&cache_path));
+        let cache_vec: HashMap<String, HashSet<String>> = serde_json::from_str(&cache_str).unwrap();
+        *cache = cache_vec;
+        drop(cache);
     }
 
     let bars = Arc::new(MultiProgress::new());
@@ -317,7 +321,7 @@ async fn drop_sync(clients: Vec<Arc<TwitchClient>>, tx: Sender<String>, cash_pat
         let notify = notify.clone();
         let tx = tx.clone();
         let webhook_tx = webhook_tx.clone();
-        let cash_path = cash_path.clone();
+        let cache_path = cache_path.clone();
         let bars = bars.clone();
 
         tokio::spawn(async move {
@@ -361,7 +365,7 @@ async fn drop_sync(clients: Vec<Arc<TwitchClient>>, tx: Sender<String>, cash_pat
                     last_claimed = drop_progress.dropID.clone();
 
                     let cache_string = serde_json::to_string_pretty(&*cache).unwrap();
-                    retry!(fs::write(&cash_path, cache_string.as_bytes()));
+                    retry!(fs::write(&cache_path, cache_string.as_bytes()));
                 }
 
                 drop(cache);
@@ -374,40 +378,42 @@ async fn drop_sync(clients: Vec<Arc<TwitchClient>>, tx: Sender<String>, cash_pat
                     "Watching"
                 };
 
-                if last_message != message {
-                    let progress_percent = if drop_progress.requiredMinutesWatched > 0 {
-                        ((drop_progress.currentMinutesWatched as f64 / drop_progress.requiredMinutesWatched as f64) * 100.0) as u8
-                    } else { 0 };
+                if webhook_is_active {
+                    if last_message != message {
+                        let progress_percent = if drop_progress.requiredMinutesWatched > 0 {
+                            ((drop_progress.currentMinutesWatched as f64 / drop_progress.requiredMinutesWatched as f64) * 100.0) as u8
+                        } else { 0 };
 
-                    let progress_text = format!("{}m / {}m", drop_progress.currentMinutesWatched, drop_progress.requiredMinutesWatched);
+                        let progress_text = format!("{}m / {}m", drop_progress.currentMinutesWatched, drop_progress.requiredMinutesWatched);
 
-                    let (game_name, game_avatar_url) = if drop_progress.dropID.is_empty() {
-                        ("None".to_string(), "None".to_string())
-                    } else {
-                        let inv = retry!(client.get_inventory());
-                        if let Some(found) = inv.inventory.dropCampaignsInProgress.as_ref().and_then(|campaigns| {
-                            campaigns.iter().find(|campaign| {
-                                campaign.timeBasedDrops.iter().any(|time_based| {
-                                    time_based.id == drop_progress.dropID
-                                })
-                            })
-                        }) {
-                            (found.game.name.clone(), found.imageURL.clone())   
+                        let (game_name, game_avatar_url) = if drop_progress.dropID.is_empty() {
+                            ("None".to_string(), "None".to_string())
                         } else {
-                            (drop_progress.game.map(|game| game.displayName).unwrap_or_else(|| "Unknown".to_string()), "None".to_string())
-                        }
-                    };
+                            let inv = retry!(client.get_inventory());
+                            if let Some(found) = inv.inventory.dropCampaignsInProgress.as_ref().and_then(|campaigns| {
+                                campaigns.iter().find(|campaign| {
+                                    campaign.timeBasedDrops.iter().any(|time_based| {
+                                        time_based.id == drop_progress.dropID
+                                    })
+                                })
+                            }) {
+                                (found.game.name.clone(), found.imageURL.clone())   
+                            } else {
+                                (drop_progress.game.map(|game| game.displayName).unwrap_or_else(|| "Unknown".to_string()), "None".to_string())
+                            }
+                        };
 
-                    let payload = WebhookSendFormat {
-                        twitch_name: client.login.clone().unwrap_or("undefined".to_string()),
-                        game_name,
-                        game_avatar_url,
-                        streamer_name: watching.channel_login.clone(),
-                        progress_percent,
-                        progress_text,
-                        status: message.to_string()
-                    };
-                    webhook_tx.send(payload).await.unwrap();
+                        let payload = WebhookSendFormat {
+                            twitch_name: client.login.clone().unwrap_or("undefined".to_string()),
+                            game_name,
+                            game_avatar_url,
+                            streamer_name: watching.channel_login.clone(),
+                            progress_percent,
+                            progress_text,
+                            status: message.to_string()
+                        };
+                        let _ = webhook_tx.send(payload).await;
+                    }
                 }
 
                 last_message = message.to_string();

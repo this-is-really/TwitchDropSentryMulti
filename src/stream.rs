@@ -295,7 +295,7 @@ impl PartialOrd for Priority {
 async fn send_now_watched (mut rx: Receiver<BinaryHeap<Priority>>, tx_now_watch: broadcast::Sender<Channel>, notify: Arc<Notify>, tx_for_delete: tokio::sync::watch::Sender<Channel>) {
     tokio::spawn(async move {
         loop {
-            if let Ok(_) = rx.changed().await {
+            if rx.changed().await.is_ok() {
                 let watch = rx.borrow().clone();
                     if let Some(max) = watch.peek() {
                         debug!("Send: {}", max.name.channel_login);
@@ -321,18 +321,20 @@ async fn send_now_watched (mut rx: Receiver<BinaryHeap<Priority>>, tx_now_watch:
                         continue;
                     }  
                 
-            }
-            
-
+            }  
         }
 
     });
 }
 
+const ALLOW_TIER: u32 = 10_000;
+const DEFAULT_TIER: u32 = 0;
+
 pub async fn update_stream (tx_now_watch: Sender<Channel>, notify: Arc<Notify>) {
     tokio::spawn(async move {
         let mut old_channel_ids: HashSet<Channel> = HashSet::new();
         let mut watched: HashSet<Channel> = HashSet::new();
+        let mut empty_cycles = 0;
 
         let (tx, rx) = tokio::sync::watch::channel(BinaryHeap::new());
         let (tx_for_delete, mut rx_for_delete) = tokio::sync::watch::channel(Channel::default());
@@ -344,10 +346,9 @@ pub async fn update_stream (tx_now_watch: Sender<Channel>, notify: Arc<Notify>) 
 
         tokio::spawn(async move {
             loop {
-                if let Ok(_) = rx_for_delete.changed().await {
+                if rx_for_delete.changed().await.is_ok() {
                     let channel = rx_for_delete.borrow().clone();
-                    let mut lock = channel_to_delete.lock().await;
-                    *lock = channel
+                    *channel_to_delete.lock().await = channel;
                 }
             }
         });
@@ -369,9 +370,11 @@ pub async fn update_stream (tx_now_watch: Sender<Channel>, notify: Arc<Notify>) 
             }
 
             let just_watched = {
-                let guard = channel_to_delete_clone.lock().await;
+                let mut guard = channel_to_delete_clone.lock().await;
                 if *guard != Channel::default() {
-                    guard.clone()
+                    let ch = guard.clone();
+                    *guard = Channel::default();
+                    ch
                 } else {
                     Channel::default()
                 }
@@ -391,7 +394,7 @@ pub async fn update_stream (tx_now_watch: Sender<Channel>, notify: Arc<Notify>) 
                 for (camp_id, allow_set) in &allow_channels {
                     if allow_set.iter().any(|s| s.id == channel.channel_id) {
                         let base = *campaign_priority.get(camp_id).unwrap_or(&0);
-                        let current_prio = base + 3;
+                        let current_prio = ALLOW_TIER + base;
                         if current_prio > prio { prio = current_prio; }
                     }
                 }
@@ -399,7 +402,7 @@ pub async fn update_stream (tx_now_watch: Sender<Channel>, notify: Arc<Notify>) 
                 for (camp_id, def_set) in &default_channels {
                     if def_set.iter().any(|s| s.broadcaster.id == channel.channel_id) {
                         let base = *campaign_priority.get(camp_id).unwrap_or(&0);
-                        let current_prio = base + 2;
+                        let current_prio = DEFAULT_TIER + base;
                         if current_prio > prio { prio = current_prio; }
                     }
                 }
@@ -413,13 +416,23 @@ pub async fn update_stream (tx_now_watch: Sender<Channel>, notify: Arc<Notify>) 
             }
 
             if new_heap.is_empty() {
+                empty_cycles += 1;
                 watched.clear();
-                sleep(Duration::from_secs(UPDATE_TIME)).await;
+
+                let pause = if empty_cycles >= 3 {
+                    tracing::warn!("No streams found for 3 cycles, pausing updates for 30 seconds");
+                    empty_cycles = 0;
+                    Duration::from_secs(30)
+                } else {
+                    Duration::from_secs(UPDATE_TIME)
+                };
+
+                sleep(pause).await;
                 continue;
             }
             
+            empty_cycles = 0;
             old_channel_ids = channel_ids;
-
             tx.send(new_heap).unwrap();
 
             sleep(Duration::from_secs(UPDATE_TIME)).await;
