@@ -3,10 +3,10 @@ use std::{collections::{BTreeMap, HashMap, HashSet, VecDeque}, error::Error, pat
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use rand::{rng, seq::{IndexedRandom, SliceRandom}};
 use tokio::{fs::{self}, sync::{Notify, broadcast::{self, Receiver, error::TryRecvError}, watch::Sender}, time::{sleep}};
-use tracing::{info};
+use tracing::{debug, info};
 use tracing_appender::rolling;
 use tracing_subscriber::fmt::{time::ChronoLocal, writer::BoxMakeWriter};
-use twitch_gql_rs::{TwitchClient, client_type::ClientType, error::ClaimDropError, structs::DropCampaigns};
+use twitch_gql_rs::{TwitchClient, client_type::ClientType, error::ClaimDropError, structs::{DropCampaigns}};
 
 mod r#static;
 mod stream;
@@ -15,7 +15,7 @@ mod webhook;
 
 use crate::{config::*, r#static::*, stream::*, webhook::{WebhookSendFormat, webhook_message_worker}};
 
-const STREAM_SLEEP: u64 = 20;
+const STREAM_SLEEP: u64 = 59;
 const MAX_COUNT: u64 = 3;
 
 async fn create_client (home_dir: &Path, proxies: &[String]) -> Result<(), Box<dyn Error>> {
@@ -194,7 +194,7 @@ async fn main_logic (client: Arc<TwitchClient> ,grouped: BTreeMap<usize, VecDequ
     let (webhook_tx, webhook_rx) = tokio::sync::mpsc::channel(100);
     let (drop_id_tx, mut drop_id_rx) = tokio::sync::watch::channel(String::new());
     let (channel_tx, channel_rx) = broadcast::channel(100);
-    let rx2 = channel_tx.subscribe();
+    let channel_rx2 = channel_tx.subscribe();
 
     let notify = Arc::new(Notify::new());
     let drop_campaigns = Arc::new(current_campaigns.clone());
@@ -216,7 +216,7 @@ async fn main_logic (client: Arc<TwitchClient> ,grouped: BTreeMap<usize, VecDequ
     };
     watch_sync(clients.clone(), channel_rx, notify.clone()).await;
     info!("Watch synchronization task has been successfully initiated");
-    drop_sync(clients.clone(), drop_id_tx, drop_cash_dir, rx2, notify.clone(), webhook_tx, weebhook_is_active).await;
+    drop_sync(clients.clone(), drop_id_tx, drop_cash_dir, channel_rx2, notify.clone(), webhook_tx, weebhook_is_active).await;
     info!("Drop progress tracker is active");
     filter_streams(client.clone(), drop_campaigns.clone()).await;
     info!("Stream filtering has begun");
@@ -262,7 +262,7 @@ async fn watch_sync (clients: Vec<Arc<TwitchClient>>, rx: Receiver<Channel>, not
         let notify = notify.clone();
         tokio::spawn(async move {
             let mut old_stream_name = String::new();
-            let mut stream_id = String::new();
+            let mut now_watching_stream: Option<(String, String, String)> = None;
 
             let mut watching = rx.recv().await.unwrap();
             loop {
@@ -275,21 +275,28 @@ async fn watch_sync (clients: Vec<Arc<TwitchClient>>, rx: Receiver<Channel>, not
                 if old_stream_name.is_empty() || old_stream_name != watching.channel_login {
                     info!("Now actively watching channel {}", watching.channel_login);
                     old_stream_name = watching.channel_login.clone();
-                    stream_id.clear();
+                    now_watching_stream = None;
                 }
 
-                if stream_id.is_empty() {
-                    let stream = retry!(client.get_stream_info(&watching.channel_login));
-                    if let Some(id) = stream.stream {
-                        stream_id = id.id
-                    } else {
-                        notify.notify_one();
-                        sleep(Duration::from_secs(STREAM_SLEEP)).await;
-                        continue;
+                let (stream_id, game_name, game_id) = match &now_watching_stream {
+                    Some(s) => s.clone(),
+                    None => {
+                        let stream_info = retry!(client.get_stream_info(&watching.channel_login));
+
+                        if let Some(stream) = stream_info.stream {
+                            let data = (stream.id, stream_info.broadcastSettings.game.name, stream_info.broadcastSettings.game.id);
+                            now_watching_stream = Some(data.clone());
+                            data
+                        } else {
+                            debug!("Stream is not live: {}", watching.channel_login);
+                            notify.notify_one();
+                            sleep(Duration::from_secs(STREAM_SLEEP)).await;
+                            continue;
+                        }
                     }
-                }
+                };
 
-                match client.send_watch(&watching.channel_login, &stream_id, &watching.channel_id).await {
+                match client.send_watch(&watching.channel_login, &stream_id, &watching.channel_id, Some(&game_name), Some(&game_id)).await {
                     Ok(_) => {
                         sleep(Duration::from_secs(STREAM_SLEEP)).await
                     },
@@ -348,7 +355,7 @@ async fn drop_sync(clients: Vec<Arc<TwitchClient>>, tx: Sender<String>, cache_pa
                     Err(_) => {}
                 }
 
-                let drop_progress = retry!(client.get_current_drop_progress_on_channel(&watching.channel_login, &watching.channel_id));
+                let drop_progress = retry!(client.get_current_drop_progress_on_channel(&watching.channel_login));
 
                 let should_claim = !drop_progress.dropID.is_empty() && drop_progress.currentMinutesWatched >= drop_progress.requiredMinutesWatched && drop_progress.dropID != last_claimed;
 
@@ -432,7 +439,8 @@ async fn drop_sync(clients: Vec<Arc<TwitchClient>>, tx: Sender<String>, cache_pa
                 bar.set_length(drop_progress.requiredMinutesWatched.max(1));
                 bar.set_position(drop_progress.currentMinutesWatched);
             
-                if drop_progress.dropID.is_empty() || drop_progress.currentMinutesWatched >= drop_progress.requiredMinutesWatched {
+                if drop_progress.dropID.is_empty() || (drop_progress.currentMinutesWatched >= drop_progress.requiredMinutesWatched && drop_progress.dropID != last_claimed) {
+                    debug!("Not claiming yet: dropID: {}, currentMinutesWatched: {}, requiredMinutesWatched: {}, lastClaimed: {}", drop_progress.dropID, drop_progress.currentMinutesWatched, drop_progress.requiredMinutesWatched, last_claimed);
                     notify.notify_one();
                     if drop_progress.dropID.is_empty() {
                         let mut lock = CHANNEL_IDS.lock().await;
