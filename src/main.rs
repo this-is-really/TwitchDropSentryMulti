@@ -166,7 +166,7 @@ async fn main () -> Result<(), Box<dyn Error>> {
 async fn main_logic (client: Arc<TwitchClient> ,grouped: BTreeMap<usize, VecDeque<DropCampaigns>>, home_dir: &Path, games: &VecDeque<String>, webhook_url: String, proxies: &[String]) -> Result<(), Box<dyn Error>> {
     let current_campaigns: VecDeque<VecDeque<DropCampaigns>> = if !games.is_empty() {
         games.iter().filter_map(|game_name| {
-            let campaigns_for_game: VecDeque<_> = grouped.values().flat_map(|campaigns_vec| {
+            let campaigns_for_game: VecDeque<DropCampaigns> = grouped.values().flat_map(|campaigns_vec| {
                 campaigns_vec.iter().filter(|campaign| campaign.game.displayName.to_lowercase().trim() == game_name.to_lowercase().trim()).cloned()
             }).collect();
 

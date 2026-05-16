@@ -429,9 +429,9 @@ pub async fn update_stream (tx_now_watch: Sender<Channel>, notify: Arc<Notify>) 
                 watched.clear();
 
                 let pause = if empty_cycles >= 3 {
-                    tracing::warn!("No streams found for 3 cycles, pausing updates for 30 seconds");
+                    tracing::warn!("No streams found for 3 cycles, pausing updates for 45 seconds");
                     empty_cycles = 0;
-                    Duration::from_secs(30)
+                    Duration::from_secs(45)
                 } else {
                     Duration::from_secs(UPDATE_TIME)
                 };
