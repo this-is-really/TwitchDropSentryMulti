@@ -14,7 +14,7 @@ const MAX_ATTEMPTS: u32 = 3;
 
 pub static ACCOUNTS: Lazy<Arc<Mutex<Option<Vec<Arc<TwitchClient>>>>>> = Lazy::new(|| Arc::new(Mutex::new(None)));
 
-pub static DROP_CASH: Lazy<Arc<Mutex<HashMap<String, HashSet<String>>>>> = Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
+pub static DROP_CACHE: Lazy<Arc<Mutex<HashMap<String, HashSet<String>>>>> = Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
 
 pub static CHANNEL_IDS: Lazy<Arc<Mutex<HashSet<Channel>>>> = Lazy::new(|| Arc::new(Mutex::new(HashSet::new())));
 
