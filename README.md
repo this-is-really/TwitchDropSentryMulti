@@ -10,11 +10,11 @@ Watch streams and claim time-based drops **for all your accounts at once** - com
 ---
 > [!IMPORTANT]
 > **DropSentry 1.0.3 - Major Quality of Life Update!**
-
+>
 > **First-Time Setup Wizard**  
 > I realized that configuring everything separately (especially for server deployment) was too complicated. Now on the **first launch** you will be greeted with an interactive setup that will help you create all necessary folders, files, and configure the basic settings step by step.
-
-![First Time Setup](assets/first_time_setup.gif)
+>
+>![First Time Setup](assets/first_time_setup.gif)
 
 ## ✨ Why DropSentry Stands Out
 - **True multi-account support** - run as many Twitch accounts as you want simultaneously
