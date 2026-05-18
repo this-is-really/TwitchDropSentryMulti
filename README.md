@@ -2,20 +2,19 @@
 [![Discord](https://img.shields.io/discord/1437005378750775359?style=for-the-badge&logo=discord&label=Join%20Discord)](https://discord.gg/7H7n4RPtJG)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Rust](https://img.shields.io/badge/Rust-000000?style=for-the-badge&logo=rust&logoColor=white)](https://www.rust-lang.org)
-[![Version](https://img.shields.io/badge/Version-1.0.1-success?style=for-the-badge)](https://github.com/this-is-really/TwitchDropSentryMulti/releases)
+[![Version](https://img.shields.io/badge/Version-1.0.3-success?style=for-the-badge)](https://github.com/this-is-really/TwitchDropSentryMulti/releases)
 
 **Next-level multi-account Twitch Drops farmer.**
 Watch streams and claim time-based drops **for all your accounts at once** - completely hands-free, blazing fast, and extremely lightweight.
 
 ---
 > [!IMPORTANT]
-> **DropSentry 1.0.1 - Minor Update!**
-> 
-> **Added Discord Webhook Support**  
-> DropSentry can now send notifications to your Discord channel.  
-> You will receive messages about important events: successful drop claims, farming start/stop, and more.
-> 
-> After extensive testing and your valuable feedback, the project remains **stable** and production-ready.
+> **DropSentry 1.0.3 - Major Quality of Life Update!**
+
+> **First-Time Setup Wizard**  
+> I realized that configuring everything separately (especially for server deployment) was too complicated. Now on the **first launch** you will be greeted with an interactive setup that will help you create all necessary folders, files, and configure the basic settings step by step.
+
+![First Time Setup](assets/first_time_setup.gif)
 
 ## ✨ Why DropSentry Stands Out
 - **True multi-account support** - run as many Twitch accounts as you want simultaneously
@@ -152,4 +151,4 @@ It’s the best motivation to keep pushing updates.
 ---
 **Made with ❤️ for the Twitch community**  
 **License:** [MIT](LICENSE)  
-**Version:** 1.0.1
+**Version:** 1.0.3
