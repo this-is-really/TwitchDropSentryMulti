@@ -83,12 +83,15 @@ async fn main () -> Result<(), Box<dyn Error>> {
     }
 
     let config_path = home_dir.join("config.json");
-    if !config_path.exists() {
-        let config = Config::new().await?;
-        config.save(&config_path).await?
-    }
+    let config = if !config_path.exists() {
+        let mut config = Config::new().await?;
+        config.first_time_setup().await?;
+        config.save(&config_path).await?;
+        config
+    } else {
+        Config::load(&config_path).await?
+    };
 
-    let config = Config::load(&config_path).await?;
     config.configure_autostart()?;
 
     let mut proxies = config.load_proxies_list().await?;

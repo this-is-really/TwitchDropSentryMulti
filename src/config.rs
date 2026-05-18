@@ -27,7 +27,76 @@ async fn open_lines (path: &str) -> Result<Lines<BufReader<File>>, Box<dyn Error
     Ok(reader)
 }
 
+fn print_section(title: &str) {
+    println!("\n\x1b[90m{}\x1b[0m", "─".repeat(50));
+    println!("\x1b[90m{}\x1b[0m", title.to_uppercase());
+}
+
 impl Config {
+    pub async fn first_time_setup (&mut self) -> Result<(), Box<dyn Error>> {
+        print_section("Autostart");
+        let autostart_question = dialoguer::Confirm::new().with_prompt("▸ Start automatically on login?").default(false).interact()?;
+        print_section("Discord Webhook");
+        let webhook_url: String = dialoguer::Input::new().with_prompt("▸ Webhook URL (optional, Enter to skip)").allow_empty(true).interact_text()?;
+        
+        //proxies list input
+        print_section("Proxies");
+        let mut proxies_vec = Vec::new();
+        loop {
+            let proxy: String = dialoguer::Input::new().with_prompt("▸ Add proxy (Enter to finish)").allow_empty(true).validate_with(|input: &String| {
+                let trimmed = input.trim();
+                if trimmed.is_empty() {
+                    return Ok(());
+                }
+                if proxies_vec.contains(&trimmed.to_string()) {
+                    Err("This proxy is already in the list.")
+                } else {
+                    Ok(())
+                }
+            }).interact_text()?;
+            if proxy.trim().is_empty() {
+                break;
+            }
+            proxies_vec.push(proxy);
+        }
+
+        //games list input
+        print_section("Game priority list");
+        let mut games_vec: VecDeque<String> = VecDeque::new();
+        
+        loop {
+            let prompt = if games_vec.is_empty() {
+                "▸ First game (Enter to skip)".to_string()
+            } else {
+                format!("▸ #{}", games_vec.len() + 1)
+            };
+            let game: String = dialoguer::Input::new().with_prompt(prompt).allow_empty(true).validate_with(|input: &String| {
+                let trimmed = input.trim();
+
+                if trimmed.is_empty() {
+                    return Ok(());
+                }
+
+                if games_vec.contains(&trimmed.to_string()) {
+                    Err("This game is already in the list.")
+                } else {
+                    Ok(())
+                }
+            }).interact_text()?;
+            
+            if game.trim().is_empty() {
+                break;
+            }
+            games_vec.push_back(game.trim().to_string());
+        }
+
+        self.save_games_list(&games_vec).await?;
+        self.save_proxies_list(&proxies_vec).await?;
+        self.autostart = autostart_question;
+        self.discord_webhook_url = webhook_url;
+        Ok(())
+    }
+
     pub fn configure_autostart (&self) -> Result<(), Box<dyn Error>> {
         let app_path = {
             let path = env::current_exe()?;
@@ -89,6 +158,18 @@ impl Config {
             serde_json::from_str(&read)?
         };
         Ok(config)
+    }
+
+    async fn save_games_list (&self, games: &VecDeque<String>) -> Result<(), Box<dyn Error>> {
+        let to_write = games.iter().map(|g| format!("{}\n", g)).collect::<String>();
+        fs::write(&self.games_path, to_write).await?;
+        Ok(())
+    }
+    
+    async fn save_proxies_list (&self, proxies: &Vec<String>) -> Result<(), Box<dyn Error>> {
+        let to_write = proxies.iter().map(|p| format!("{}\n", p)).collect::<String>();
+        fs::write(&self.proxies_path, to_write).await?;
+        Ok(())
     }
 
     pub async fn load_proxies_list (&self) -> Result<Vec<String>, Box<dyn Error>> {
