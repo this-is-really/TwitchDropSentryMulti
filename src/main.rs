@@ -1,8 +1,8 @@
 use std::{collections::{BTreeMap, HashMap, HashSet, VecDeque}, error::Error, path::{Path, PathBuf}, sync::Arc, time::Duration};
 
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use rand::{rng, seq::{IndexedRandom, SliceRandom}};
-use tokio::{fs::{self}, sync::{Notify, broadcast::{self, Receiver, error::TryRecvError}, watch::Sender}, time::{sleep}};
+use rand::{RngExt, SeedableRng, rng, rngs::SmallRng, seq::{IndexedRandom, SliceRandom}};
+use tokio::{fs::{self}, sync::{Mutex, Notify, broadcast::{self, Receiver, error::TryRecvError}, watch::Sender}, time::sleep};
 use tracing::{debug, info};
 use tracing_appender::rolling;
 use tracing_subscriber::fmt::{time::ChronoLocal, writer::BoxMakeWriter};
@@ -167,7 +167,7 @@ async fn main () -> Result<(), Box<dyn Error>> {
 }
 
 async fn main_logic (client: Arc<TwitchClient> ,grouped: BTreeMap<usize, VecDeque<DropCampaigns>>, home_dir: &Path, games: &VecDeque<String>, webhook_url: String, proxies: &[String]) -> Result<(), Box<dyn Error>> {
-    let current_campaigns: VecDeque<VecDeque<DropCampaigns>> = if !games.is_empty() {
+    let query_games: VecDeque<VecDeque<DropCampaigns>> = if !games.is_empty() {
         games.iter().filter_map(|game_name| {
             let campaigns_for_game: VecDeque<DropCampaigns> = grouped.values().flat_map(|campaigns_vec| {
                 campaigns_vec.iter().filter(|campaign| campaign.game.displayName.to_lowercase().trim() == game_name.to_lowercase().trim()).cloned()
@@ -180,6 +180,18 @@ async fn main_logic (client: Arc<TwitchClient> ,grouped: BTreeMap<usize, VecDequ
             }
         }).collect()
     } else {
+        VecDeque::new()
+    };
+
+    if query_games.is_empty() {
+        tracing::info!("No active campaigns found for the games in config. Retrying in 10 minutes...");
+        sleep(Duration::from_secs(10*60)).await;
+        return Ok(());
+    }
+
+    let current_campaigns = if !games.is_empty() {
+        query_games
+    } else {
         for (id, obj) in &grouped {
             for i in obj {
                 println!("{} | {}", id, i.game.displayName);
@@ -190,17 +202,13 @@ async fn main_logic (client: Arc<TwitchClient> ,grouped: BTreeMap<usize, VecDequ
         vec![selected].into()
     };
 
-    if current_campaigns.is_empty() {
-        return Err("No campaigns found for the selected game")?;
-    }
-
     let (webhook_tx, webhook_rx) = tokio::sync::mpsc::channel(100);
     let (drop_id_tx, mut drop_id_rx) = tokio::sync::watch::channel(String::new());
     let (channel_tx, channel_rx) = broadcast::channel(100);
     let channel_rx2 = channel_tx.subscribe();
 
     let notify = Arc::new(Notify::new());
-    let drop_campaigns = Arc::new(current_campaigns.clone());
+    let drop_campaigns = Arc::new(Mutex::new(current_campaigns.clone()));
     let drop_cash_dir = home_dir.join("cash.json");
 
     let clients = ACCOUNTS.lock().await;
@@ -226,9 +234,10 @@ async fn main_logic (client: Arc<TwitchClient> ,grouped: BTreeMap<usize, VecDequ
     update_stream(channel_tx, notify).await;
     info!("Stream priority updated");
 
-    let mut pending_drops: HashSet<String> = HashSet::new();
+    let pending_drops = Arc::new(Mutex::new(HashSet::new()));
     {
         let cash = DROP_CACHE.lock().await.clone();
+        let mut pd_lock = pending_drops.lock().await;
 
         for game_campaign in current_campaigns {
             for campaign in game_campaign {
@@ -241,21 +250,135 @@ async fn main_logic (client: Arc<TwitchClient> ,grouped: BTreeMap<usize, VecDequ
                     }
                 }
                 for drop in campaign_details.timeBasedDrops {
-                    pending_drops.insert(drop.id);
+                    pd_lock.insert(drop.id);
                 }
         }
         }
     }
 
-    while !pending_drops.is_empty() {
-        drop_id_rx.changed().await.ok();
-        let drop_id = drop_id_rx.borrow().clone();
-        if !drop_id.is_empty() && pending_drops.remove(&drop_id) {
-            info!("Drop {} processed (remaining: {})", drop_id, pending_drops.len());
-        }
+    if !games.is_empty() {
+        let games_clone = games.clone();
+        let pending_drops_clone = pending_drops.clone();
+        let mut rng = rng();
+        let mut rng = SmallRng::from_rng(&mut rng);
+        tokio::spawn(async move {
+            loop {
+                let jitter = rng.random_range(15..=30);
+                sleep(Duration::from_secs(jitter * 60)).await;
+                tracing::info!("Refreshing campaign data...");
+                let campaign_res = match client.get_campaign().await {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::error!("Failed to refresh campaign data: {e}");
+                        continue;
+                    }
+                };
+
+                let campaign = campaign_res.dropCampaigns;
+                let mut id_to_index = HashMap::new();
+                let mut grouped: BTreeMap<usize, VecDeque<DropCampaigns>> = BTreeMap::new();
+                let mut next_index: usize = 0;
+                for obj in campaign {
+                    if obj.status == "EXPIRED" {
+                        continue;
+                    }
+                    let idx = *id_to_index.entry(obj.game.id.clone()).or_insert_with(|| {
+                        let i = next_index;
+                        next_index += 1;
+                        i
+                    });
+
+                    grouped.entry(idx).or_default().push_front(obj);
+                }
+
+                let new_query_games: VecDeque<VecDeque<DropCampaigns>> = games_clone.iter().filter_map(|game_name| {
+                    let campaigns_for_game: VecDeque<DropCampaigns> = grouped.values().flat_map(|campaigns_vec| {
+                        campaigns_vec.iter().filter(|campaign| campaign.game.displayName.to_lowercase().trim() == game_name.to_lowercase().trim()).cloned()
+                    }).collect();
+                
+                    if campaigns_for_game.is_empty() {
+                        None
+                    } else {
+                        Some(campaigns_for_game)
+                    }
+                }).collect();
+
+                if new_query_games.is_empty() {
+                    tracing::info!("No active campaigns found for the configured games. Will check again in 10 minutes...");
+                    continue;
+                }
+
+                let mut priority_map = HashMap::new();
+                for (game_idx, campaign_queue) in new_query_games.iter().enumerate() {
+                    let base_prio = ((new_query_games.len() - game_idx) * 10) as u32;
+                    for camp in campaign_queue {
+                        priority_map.insert(camp.id.clone(), base_prio);
+                    }
+                }
+
+                {
+                    let mut lock = CAMPAIGN_PRIORITY.lock().await;
+                    *lock = priority_map;
+                }
+
+                {
+                    let mut lock = drop_campaigns.lock().await;
+                    *lock = new_query_games.clone();
+                }
+
+                let cash = DROP_CACHE.lock().await.clone();
+                let mut new_pending = HashSet::new();
+
+                for game_campaign in new_query_games {
+                    for camp in game_campaign {
+                        if let Ok(mut campaign_details) = client.get_campaign_details(&camp.id).await {
+                            if let Some(allow) = &campaign_details.allow.channels {
+                                let mut allow_lock = ALLOW_CHANNELS.lock().await;
+                                let allow_set = allow.clone().into_iter().collect();
+                                allow_lock.insert(camp.id.clone(), allow_set);
+                            }
+
+                            for (_, claimed_drops) in &cash {
+                                for drop_id_cache in claimed_drops {
+                                    if let Some(pos) = campaign_details.timeBasedDrops.iter().position(|d| d.id == *drop_id_cache) {
+                                        campaign_details.timeBasedDrops.remove(pos);
+                                    }
+                                }
+                            }
+                            for drop in campaign_details.timeBasedDrops {
+                                new_pending.insert(drop.id);
+                            }
+                        }
+                    }
+                }
+
+                let mut pd_lock = pending_drops_clone.lock().await;
+                pd_lock.extend(new_pending);
+            }
+        });
     }
 
-    info!("✅ All drops for the selected game are claimed!");
+    let mut empty_notified = false;
+    loop {
+        drop_id_rx.changed().await.ok();
+        let drop_id = drop_id_rx.borrow().clone();
+
+        let mut pd_lock = pending_drops.lock().await;
+        if !drop_id.is_empty() && pd_lock.remove(&drop_id) {
+            info!("Drop {} processed (remaining: {})", drop_id, pd_lock.len());
+            empty_notified = false;
+        }
+
+        if pd_lock.is_empty() {
+            if games.is_empty() {
+                info!("✅ All drops for the selected game are claimed!");
+                break;
+            } else if !empty_notified {
+                info!("✅ All currently known drops are claimed! Waiting for new campaigns...");
+                empty_notified = true;
+            }
+        }
+    }
     Ok(())
 }
 

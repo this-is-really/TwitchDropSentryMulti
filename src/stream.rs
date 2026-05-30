@@ -15,7 +15,8 @@ const UPDATE_TIME: u64 = 45;
 const MAX_TOPICS: usize = 40;
 const WS_URL: &'static str = "wss://pubsub-edge.twitch.tv/v1";
 
-pub async fn filter_streams (client: Arc<TwitchClient>, campaigns: Arc<VecDeque<VecDeque<DropCampaigns>>>) {
+pub async fn filter_streams (client: Arc<TwitchClient>, campaigns_arc: Arc<Mutex<VecDeque<VecDeque<DropCampaigns>>>>) {
+    let campaigns = campaigns_arc.lock().await.clone();
     let mut count = 0;
     let mut video_vec = HashSet::new();
     let mut priority_map = HashMap::new();
@@ -92,6 +93,7 @@ pub async fn filter_streams (client: Arc<TwitchClient>, campaigns: Arc<VecDeque<
             drop(lock);
             if count < MAX_TOPICS {
                 let mut to_add = HashSet::new();
+                let campaigns = campaigns_arc.lock().await.clone();
                 for campaign_queue in campaigns.iter() {
                     for campaign in campaign_queue {
                         let allow_channels = ALLOW_CHANNELS.lock().await;
