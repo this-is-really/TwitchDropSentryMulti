@@ -101,6 +101,7 @@ async fn main () -> Result<(), Box<dyn Error>> {
 
     let mut proxy_pool = proxies.iter().cycle();
 
+    let delete_dir = Path::new("delete_accounts");
     let mut loaded_clients = Vec::new();
     let mut entries = fs::read_dir(&home_dir).await?;
     while let Some(entry) = entries.next_entry().await? {
@@ -108,6 +109,16 @@ async fn main () -> Result<(), Box<dyn Error>> {
         if path.is_file() && path.extension().map_or(false, |s| s == "json" ) && path.file_name().unwrap_or_default() != "cash.json" && path.file_name().unwrap_or_default() != "config.json" {
             let selected_proxy = proxy_pool.next();
             let client = TwitchClient::load_from_file(&path, &selected_proxy.cloned()).await?;
+            if let Err(e) = client.get_campaign().await {
+                if !delete_dir.exists() {
+                    fs::create_dir_all(&delete_dir).await?;
+                }
+                let new_path = delete_dir.join(path.file_name().unwrap_or_default());
+                client.save_file(&new_path).await?;
+                fs::remove_file(&path).await?;
+                tracing::error!("Failed to load client from file {}: {e}", path.display());
+                continue;
+            }
             loaded_clients.push(Arc::new(client));
         }
     }
@@ -183,7 +194,7 @@ async fn main_logic (client: Arc<TwitchClient> ,grouped: BTreeMap<usize, VecDequ
         VecDeque::new()
     };
 
-    if query_games.is_empty() {
+    if query_games.is_empty() && !games.is_empty() {
         tracing::info!("No active campaigns found for the games in config. Retrying in 10 minutes...");
         sleep(Duration::from_secs(10*60)).await;
         return Ok(());
