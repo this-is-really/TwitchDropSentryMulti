@@ -32,8 +32,11 @@ fn print_section(title: &str) {
     println!("\x1b[90m{}\x1b[0m", title.to_uppercase());
 }
 
+const ASCII_BANNER: &str = include_str!("../assets/ascii.txt");
+
 impl Config {
     pub async fn first_time_setup (&mut self) -> Result<(), Box<dyn Error>> {
+        print_section(ASCII_BANNER);
         print_section("Autostart");
         let autostart_question = dialoguer::Confirm::new().with_prompt("▸ Start automatically on login?").default(false).interact()?;
         print_section("Discord Webhook");
@@ -89,7 +92,7 @@ impl Config {
             }
             games_vec.push_back(game.trim().to_string());
         }
-
+        print_section("");
         self.save_games_list(&games_vec).await?;
         self.save_proxies_list(&proxies_vec).await?;
         self.autostart = autostart_question;
