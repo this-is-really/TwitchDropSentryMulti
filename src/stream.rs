@@ -42,7 +42,13 @@ pub async fn filter_streams (client: Arc<TwitchClient>, campaigns_arc: Arc<Mutex
                         if count >= MAX_TOPICS {
                             break;
                         }
-                        let avaiable_drops = retry!(client.get_available_drops_for_channel(&channel.id));
+                        let avaiable_drops = match retry_backup(|| client.get_available_drops_for_channel(&channel.id)).await {
+                            Ok(drops) => drops,
+                            Err(e) => {
+                                tracing::error!("{e}");
+                                continue;
+                            }
+                        };
                         if avaiable_drops.viewerDropCampaigns.is_some() {
                             video_vec.insert(Channel { channel_id: channel.id, channel_login: channel.name });
                             count += 1
@@ -65,7 +71,13 @@ pub async fn filter_streams (client: Arc<TwitchClient>, campaigns_arc: Arc<Mutex
                         break;
                     }
                     if stream_info.stream.is_some() {
-                        let available_drops = retry!(client.get_available_drops_for_channel(&channel.broadcaster.id));
+                        let available_drops = match retry_backup(|| client.get_available_drops_for_channel(&channel.broadcaster.id)).await {
+                            Ok(drops) => drops,
+                            Err(e) => {
+                                tracing::error!("{e}");
+                                continue;
+                            }
+                        };
                         if available_drops.viewerDropCampaigns.is_some() {
                             video_vec.insert(Channel { channel_id: channel.broadcaster.id, channel_login: channel.broadcaster.login });
                             count += 1

@@ -401,7 +401,14 @@ async fn watch_sync (clients: Vec<Arc<TwitchClient>>, rx: Receiver<Channel>, not
             let mut old_stream_name = String::new();
             let mut now_watching_stream: Option<(String, String, String)> = None;
 
-            let mut watching = rx.recv().await.unwrap();
+            let mut watching = match rx.recv().await {
+                Ok(w) => w,
+                Err(e) => {
+                    tracing::debug!("{e}");
+                    tracing::error!("Failed to receive initial channel to watch. Watch synchronization will not start for this client");
+                    return ;
+                }  
+            };
             loop {
                 match rx.try_recv() {
                     Ok(channel) => watching = channel,
@@ -478,7 +485,10 @@ async fn drop_sync(clients: Vec<Arc<TwitchClient>>, tx: Sender<String>, cache_pa
             bar.set_message("Initialization...");
             bar.enable_steady_tick(Duration::from_millis(500));
 
-            let mut watching = rx_watch.recv().await.unwrap();
+            let mut watching = match rx_watch.recv().await {
+                Ok(channel) => channel,
+                Err(_) => return,
+            };
             let mut last_drop_id = String::new();
 
             loop {
