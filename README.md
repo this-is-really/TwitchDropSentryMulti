@@ -2,25 +2,27 @@
 [![Discord](https://img.shields.io/discord/1437005378750775359?style=for-the-badge&logo=discord&label=Join%20Discord)](https://discord.gg/7H7n4RPtJG)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Rust](https://img.shields.io/badge/Rust-000000?style=for-the-badge&logo=rust&logoColor=white)](https://www.rust-lang.org)
-[![Version](https://img.shields.io/badge/Version-1.0.3-success?style=for-the-badge)](https://github.com/this-is-really/TwitchDropSentryMulti/releases)
+[![Version](https://img.shields.io/badge/Version-1.0.4-success?style=for-the-badge)](https://github.com/this-is-really/TwitchDropSentryMulti/releases)
 
 **Next-level multi-account Twitch Drops farmer.**
 Watch streams and claim time-based drops **for all your accounts at once** - completely hands-free, blazing fast, and extremely lightweight.
 
 ---
 > [!IMPORTANT]
-> **DropSentry 1.0.3 - Major Quality of Life Update!**
+> **DropSentry 1.0.4 - Account Validation**
 >
-> **First-Time Setup Wizard**  
-> I realized that configuring everything separately (especially for server deployment) was too complicated. Now on the **first launch** you will be greeted with an interactive setup that will help you create all necessary folders, files, and configure the basic settings step by step.
+> **Automatic Account Health Check**
 >
->![First Time Setup](assets/first_time_setup.gif)
+> DropSentry now verifies every account on startup and during farming by sending a real request to Twitch. If an account is dead (banned, expired token, invalid credentials), it's automatically moved to the `delete_accounts/` folder - no more manual cleanup, no more crashes from stale accounts.
+>
+> Also fixed: the tool no longer crashes when a configured game has no drops in the list - it now simply waits instead.
 
 ## ✨ Why DropSentry Stands Out
 - **True multi-account support** - run as many Twitch accounts as you want simultaneously
 - **Smart game priority system** - just list your games; the higher in the file, the higher the priority
 - **Proxy support** - dedicated proxy list for maximum privacy and safety
 - **Discord Webhook notifications** - real-time alerts for drop claims, farming status and more
+- **Automatic account validation** - dead accounts are detected and cleaned up automatically
 - **Autostart + fully customizable config**
 - **Beautiful real-time UI** with per-account progress bars
 - **Auto-claim + anti-duplicate protection**
@@ -54,7 +56,7 @@ All settings are now in one clean file:
 }
 ```
 
-### Discord Webhook Support (NEW in 1.0.1)
+### Discord Webhook Support (since 1.0.1)
 - New field: **`discord_webhook_url`**
 - Paste your Discord Webhook URL to enable notifications.
 - If left empty (`""`), notifications will be completely disabled.
@@ -72,10 +74,17 @@ All settings are now in one clean file:
 **Notifications preview:**  
 ![Webhook notifications](assets/webhook.png)
 
+### Account Validation (NEW in 1.0.4)
+- DropSentry checks the health of every account on startup and periodically while farming.
+- A real request is sent to Twitch for each account - if Twitch responds with an error (ban, expired session, invalid credentials), the account is flagged as invalid.
+- Invalid accounts are automatically moved to the **`delete_accounts/`** folder, so your active accounts list stays clean without any manual intervention.
+- Farming continues uninterrupted for all remaining valid accounts.
+
 ### What the program does automatically
 - On first launch it creates the `lists/` folder and the necessary files inside
 - You can point it to your own custom paths if you prefer
-- The new `discord_webhook_url` field is automatically added to existing configs
+- The `discord_webhook_url` field is automatically added to existing configs
+- Dead/invalid accounts are detected and moved to `delete_accounts/` automatically
 
 ### `lists/games.txt` (priority from top to bottom)
 ```txt
@@ -98,13 +107,14 @@ Fully supports HTTP and SOCKS5 (with or without authentication).
 
 ## How It Works
 1. Logs into **all** configured Twitch accounts
-2. Fetches current Drop campaigns
-3. For each account picks the highest-priority eligible game
-4. Finds the best live stream for that game
-5. Emulates real viewing via official Twitch GQL
-6. Shows beautiful real-time progress for every account
-7. Automatically claims drops and saves history to prevent duplicates
-8. Sends Discord webhook notifications when configured
+2. Validates each account's health via the Twitch API and quarantines dead ones
+3. Fetches current Drop campaigns
+4. For each account picks the highest-priority eligible game
+5. Finds the best live stream for that game (or waits patiently if none is live yet)
+6. Emulates real viewing via official Twitch GQL
+7. Shows beautiful real-time progress for every account
+8. Automatically claims drops and saves history to prevent duplicates
+9. Sends Discord webhook notifications when configured
 
 ## 📥 Pre-built Binaries & Builds
 
@@ -146,9 +156,11 @@ It’s the best motivation to keep pushing updates.
   </a>
   <br><br>
   <a href="https://boosty.to/this-is-really">Boosty</a>
+  <br><br>
+  <b>USDT (TRC20):</b> <code>TRiVzMYpcDovpw2g614FGGzFR9Ws6gXqgU</code>
 </div>
 
 ---
 **Made with ❤️ for the Twitch community**  
 **License:** [MIT](LICENSE)  
-**Version:** 1.0.3
+**Version:** 1.0.4
