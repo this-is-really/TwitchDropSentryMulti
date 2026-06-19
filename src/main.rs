@@ -3,7 +3,7 @@ use std::{collections::{BTreeMap, HashMap, HashSet, VecDeque}, error::Error, pat
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use rand::{RngExt, SeedableRng, rng, rngs::SmallRng, seq::{IndexedRandom, SliceRandom}};
 use tokio::{fs::{self}, sync::{Mutex, Notify, broadcast::{self, Receiver, error::TryRecvError}, watch::Sender}, time::sleep};
-use tracing::{debug, info};
+use tracing::{debug, info, level_filters::LevelFilter};
 use tracing_appender::rolling;
 use tracing_subscriber::fmt::{time::ChronoLocal, writer::BoxMakeWriter};
 use twitch_gql_rs::{TwitchClient, client_type::ClientType, error::ClaimDropError, structs::{DropCampaigns}};
@@ -75,8 +75,11 @@ async fn create_client (home_dir: &Path, proxies: &[String]) -> Result<(), Box<d
 
 #[tokio::main]
 async fn main () -> Result<(), Box<dyn Error>> {
+    let debug = std::env::args().any(|a| a == "--debug");
+    let level = if debug { LevelFilter::DEBUG } else { LevelFilter::INFO };
+
     let file_appender = rolling::never(".", "app.log");
-    tracing_subscriber::fmt().with_writer(BoxMakeWriter::new(file_appender)).with_ansi(false).with_timer(ChronoLocal::new("%Y-%m-%d %H:%M:%S%.3f".into())).init();
+    tracing_subscriber::fmt().with_writer(BoxMakeWriter::new(file_appender)).with_max_level(level).with_ansi(false).with_timer(ChronoLocal::new("%Y-%m-%d %H:%M:%S%.3f".into())).init();
     let home_dir = Path::new("data");
     if !home_dir.exists() {
         fs::create_dir_all(&home_dir).await?;
