@@ -2,20 +2,18 @@
 [![Discord](https://img.shields.io/discord/1437005378750775359?style=for-the-badge&logo=discord&label=Join%20Discord)](https://discord.gg/7H7n4RPtJG)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Rust](https://img.shields.io/badge/Rust-000000?style=for-the-badge&logo=rust&logoColor=white)](https://www.rust-lang.org)
-[![Version](https://img.shields.io/badge/Version-1.0.4-success?style=for-the-badge)](https://github.com/this-is-really/TwitchDropSentryMulti/releases)
+[![Version](https://img.shields.io/badge/Version-1.0.5-success?style=for-the-badge)](https://github.com/this-is-really/TwitchDropSentryMulti/releases)
 
 **Next-level multi-account Twitch Drops farmer.**
 Watch streams and claim time-based drops **for all your accounts at once** - completely hands-free, blazing fast, and extremely lightweight.
 
 ---
 > [!IMPORTANT]
-> **DropSentry 1.0.4 - Account Validation**
+> **DropSentry 1.0.5 - Stability and diagnostics**
 >
-> **Automatic Account Health Check**
+> Improved error handling and logging now cover startup, stream watching, campaign handling, and drop retrieval. Failed client loads are handled more safely, with invalid state moved to `delete_accounts/` instead of crashing.
 >
-> DropSentry now verifies every account on startup and during farming by sending a real request to Twitch. If an account is dead (banned, expired token, invalid credentials), it's automatically moved to the `delete_accounts/` folder - no more manual cleanup, no more crashes from stale accounts.
->
-> Also fixed: the tool no longer crashes when a configured game has no drops in the list - it now simply waits instead.
+> Use the dedicated `--debug` mode documented below for detailed diagnostics and bug reports.
 
 ## ✨ Why DropSentry Stands Out
 - **True multi-account support** - run as many Twitch accounts as you want simultaneously
@@ -94,7 +92,7 @@ Warhammer 40,000: Darktide
 Rust
 Valorant
 ```
-**The higher the game is in the list — the higher its priority.**  
+**The higher the game is in the list - the higher its priority.**  
 The tool will first try to find a stream for the top game, then the next, and so on.
 
 ### `lists/proxies.txt` (one proxy per line)
@@ -139,11 +137,20 @@ chmod +x twitchdrops_miner-*
 ## 💾 Data & Security
 All sessions and data are stored as plain JSON files in the `data/` folder.  
 **Recommendation:** Use farming-only accounts and always enable proxies.  
-We are not responsible for bans or data leaks — use at your own risk.
+We are not responsible for bans or data leaks - use at your own risk.
 
 ## 🐞 Bug Reports
 Found a bug (critical or minor)? Open an **Issue** right away.  
 Every report helps make the project even better.
+
+## 🛠️ Debug Mode (`--debug`)
+- Run the binary with `--debug` to enable verbose diagnostic logging for startup, account validation, stream watching, and drop retrieval.
+- This mode is the best way to capture full runtime details when troubleshooting.
+- When reporting an issue, include:
+  - the full `--debug` console output
+  - the exact command you used
+  - any relevant `data/config.json` settings
+  - files moved to `delete_accounts/`
 
 ## ⭐ Support the Project
 If DropSentry is helping you farm drops, please drop a **star** ⭐  
@@ -163,4 +170,4 @@ It’s the best motivation to keep pushing updates.
 ---
 **Made with ❤️ for the Twitch community**  
 **License:** [MIT](LICENSE)  
-**Version:** 1.0.4
+**Version:** 1.0.5
