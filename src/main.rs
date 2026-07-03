@@ -143,12 +143,12 @@ async fn main () -> Result<(), Box<dyn Error>> {
 
         match select {
             0 => {
-                create_client(&home_dir, &proxies).await.unwrap()
+                create_client(&home_dir, &proxies).await?
             },
             1 => {
                 let clients = ACCOUNTS.lock().await;
                 let client = if let Some(accounts) = clients.clone() {
-                    accounts.first().cloned().unwrap()
+                    accounts.first().cloned().ok_or("No accounts found")?
                 } else {
                     return Err("Didn't find accounts")?;
                 };
@@ -521,7 +521,13 @@ async fn drop_sync(clients: Vec<Arc<TwitchClient>>, tx: Sender<String>, cache_pa
 
                     last_claimed = drop_progress.dropID.clone();
 
-                    let cache_string = serde_json::to_string_pretty(&*cache).unwrap();
+                    let cache_string = match serde_json::to_string_pretty(&*cache) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            tracing::error!("Failed to serialize cache to JSON: {e}");
+                            continue;
+                        }
+                    };
                     retry!(fs::write(&cache_path, cache_string.as_bytes()));
                 }
 

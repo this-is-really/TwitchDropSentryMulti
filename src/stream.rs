@@ -92,17 +92,17 @@ pub async fn filter_streams (client: Arc<TwitchClient>, campaigns_arc: Arc<Mutex
     *cp_lock = priority_map;
     drop(cp_lock);
 
-    let mut lock = CHANNEL_IDS.lock().await;
-    *lock = video_vec;
-    drop(lock);
-    debug!("Drop lock video");
+    let mut video_ids_lock = CHANNEL_IDS.lock().await;
+    *video_ids_lock = video_vec;
+    drop(video_ids_lock);
+    debug!("Drop video_ids_lock");
     spawn_ws(client.access_token.clone().unwrap()).await;
 
     tokio::spawn(async move {
         loop {
-            let lock = CHANNEL_IDS.lock().await;
-            let count = lock.len();
-            drop(lock);
+            let channel_ids_lock = CHANNEL_IDS.lock().await;
+            let count = channel_ids_lock.len();
+            drop(channel_ids_lock);
             if count < MAX_TOPICS {
                 let mut to_add = HashSet::new();
                 let campaigns = campaigns_arc.lock().await.clone();
@@ -163,18 +163,18 @@ pub async fn filter_streams (client: Arc<TwitchClient>, campaigns_arc: Arc<Mutex
                     }   
                 }
 
-                let mut lock = CHANNEL_IDS.lock().await;
-                let mut cur = lock.len();
+                let mut channel_ids_lock = CHANNEL_IDS.lock().await;
+                let mut cur = channel_ids_lock.len();
                 for channel in to_add {
                     if cur >= MAX_TOPICS { 
                         break 
                     };
-                    lock.insert(channel);
+                    channel_ids_lock.insert(channel);
                     cur += 1;
                 }
-                drop(lock);
+                drop(channel_ids_lock);
             }
-            debug!("Drop ids");
+            debug!("Drop channel_ids_lock");
             sleep(Duration::from_secs(UPDATE_TIME)).await
         }
     });
@@ -230,6 +230,7 @@ async fn spawn_ws (auth_token: String) {
                         Ok(Message::Text(text)) => {
                             debug!("Received WebSocket message: {text}");
                             if text.contains("\"type\":\"PING\"") {
+                                debug!("Received PING from WebSocket, sending PONG");
                                 let pong = Message::Text("{\"type\":\"PONG\"}".into());
                                 write.send(pong).await.unwrap();
                             }
@@ -257,13 +258,7 @@ async fn spawn_ws (auth_token: String) {
                                         }
                                     }
                                 } else {
-                                    if let Some(id_str) = topic.split('.').last() {
-                                        let mut channel_ids = CHANNEL_IDS.lock().await;
-                                        if let Some(to_remove) = channel_ids.iter().find(|channel| channel.channel_id == id_str).cloned() {
-                                            channel_ids.remove(&to_remove);
-                                        };
-                                        send_channels.retain(|channel| channel.channel_id != id_str );
-                                    }
+                                    debug!("No viewers field in message for topic {}", topic);
                                 }
                             }
 
@@ -273,7 +268,7 @@ async fn spawn_ws (auth_token: String) {
                         Err(e) => {
                             debug!("WebSocket error: {e}");
                             sleep(Duration::from_secs(UPDATE_TIME)).await;
-                            break ;
+                            break
                         } 
                     }
                 }
@@ -456,7 +451,7 @@ pub async fn update_stream (tx_now_watch: Sender<Channel>, notify: Arc<Notify>) 
             
             empty_cycles = 0;
             old_channel_ids = channel_ids;
-            stream_candidates_tx.send(new_heap).unwrap();
+            let _ = stream_candidates_tx.send(new_heap);
 
             sleep(Duration::from_secs(UPDATE_TIME)).await;
         }
