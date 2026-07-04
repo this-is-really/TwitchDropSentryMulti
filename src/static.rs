@@ -1,6 +1,5 @@
 use std::{collections::{HashMap, HashSet}, sync::Arc, time::Duration};
 
-use once_cell::sync::Lazy;
 use tokio::{sync::Mutex, time::sleep};
 use twitch_gql_rs::{TwitchClient, structs::{Channels, GameDirectory}};
 
@@ -12,17 +11,15 @@ pub struct Channel {
 
 const MAX_ATTEMPTS: u32 = 3;
 
-pub static ACCOUNTS: Lazy<Arc<Mutex<Option<Vec<Arc<TwitchClient>>>>>> = Lazy::new(|| Arc::new(Mutex::new(None)));
-
-pub static DROP_CACHE: Lazy<Arc<Mutex<HashMap<String, HashSet<String>>>>> = Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
-
-pub static CHANNEL_IDS: Lazy<Arc<Mutex<HashSet<Channel>>>> = Lazy::new(|| Arc::new(Mutex::new(HashSet::new())));
-
-pub static DEFAULT_CHANNELS: Lazy<Arc<Mutex<HashMap<String, HashSet<GameDirectory>>>>> = Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
-
-pub static ALLOW_CHANNELS: Lazy<Arc<Mutex<HashMap<String, HashSet<Channels>>>>> = Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
-
-pub static CAMPAIGN_PRIORITY: Lazy<Arc<Mutex<HashMap<String, u32>>>> = Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
+#[derive(Debug, Default)]
+pub struct AppState {
+    pub accounts: Mutex<Option<Vec<Arc<TwitchClient>>>>,
+    pub drop_cache: Mutex<HashMap<String, HashSet<String>>>,
+    pub channel_ids: Mutex<HashSet<Channel>>,
+    pub default_channels: Mutex<HashMap<String, HashSet<GameDirectory>>>,
+    pub allow_channeld: Mutex<HashMap<String, HashSet<Channels>>>,
+    pub campaign_priority: Mutex<HashMap<String, u32>>
+}
 
 #[macro_export]
 macro_rules! retry {

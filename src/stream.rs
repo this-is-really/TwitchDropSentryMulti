@@ -6,16 +6,16 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use tokio::time::sleep;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
-use tracing::{debug};
+use tracing::{debug, error, warn};
 use twitch_gql_rs::{TwitchClient, structs::{Channels, DropCampaigns, GameDirectory}};
 
-use crate::{retry, r#static::{ALLOW_CHANNELS, CAMPAIGN_PRIORITY, CHANNEL_IDS, Channel, DEFAULT_CHANNELS, retry_backup}};
+use crate::{retry, r#static::{AppState, Channel, retry_backup}};
 
 const UPDATE_TIME: u64 = 45;
 const MAX_TOPICS: usize = 40;
 const WS_URL: &'static str = "wss://pubsub-edge.twitch.tv/v1";
 
-pub async fn filter_streams (client: Arc<TwitchClient>, campaigns_arc: Arc<Mutex<VecDeque<VecDeque<DropCampaigns>>>>) {
+pub async fn filter_streams (client: Arc<TwitchClient>, campaigns_arc: Arc<Mutex<VecDeque<VecDeque<DropCampaigns>>>>, state: Arc<AppState>) {
     let campaigns = campaigns_arc.lock().await.clone();
     let mut count = 0;
     let mut video_vec = HashSet::new();
@@ -27,7 +27,7 @@ pub async fn filter_streams (client: Arc<TwitchClient>, campaigns_arc: Arc<Mutex
             priority_map.insert(campaign.id.clone(), base_prio);
             let campaign_details = retry!(client.get_campaign_details(&campaign.id));
             if let Some(allow) = campaign_details.allow.channels {
-                let mut allow_channels = ALLOW_CHANNELS.lock().await;
+                let mut allow_channels = state.allow_channeld.lock().await;
                 let allow: HashSet<Channels> = allow.into_iter().collect();
                 allow_channels.insert(campaign.id.to_string(), allow.clone());
                 drop(allow_channels);
@@ -45,7 +45,7 @@ pub async fn filter_streams (client: Arc<TwitchClient>, campaigns_arc: Arc<Mutex
                         let avaiable_drops = match retry_backup(|| client.get_available_drops_for_channel(&channel.id)).await {
                             Ok(drops) => drops,
                             Err(e) => {
-                                tracing::error!("{e}");
+                                error!("{e}");
                                 continue;
                             }
                         };
@@ -57,7 +57,7 @@ pub async fn filter_streams (client: Arc<TwitchClient>, campaigns_arc: Arc<Mutex
                 }
             } else {
                 let game_directory = retry!(client.get_game_directory(&campaign_details.game.slug, 30, true));
-                let mut all_default = DEFAULT_CHANNELS.lock().await;
+                let mut all_default = state.default_channels.lock().await;
                 let game_directory: HashSet<GameDirectory> = game_directory.into_iter().collect();
                 all_default.insert(campaign.id.to_string(), game_directory.clone());
                 drop(all_default);
@@ -74,7 +74,7 @@ pub async fn filter_streams (client: Arc<TwitchClient>, campaigns_arc: Arc<Mutex
                         let available_drops = match retry_backup(|| client.get_available_drops_for_channel(&channel.broadcaster.id)).await {
                             Ok(drops) => drops,
                             Err(e) => {
-                                tracing::error!("{e}");
+                                error!("{e}");
                                 continue;
                             }
                         };
@@ -88,19 +88,19 @@ pub async fn filter_streams (client: Arc<TwitchClient>, campaigns_arc: Arc<Mutex
         }
     }
 
-    let mut cp_lock = CAMPAIGN_PRIORITY.lock().await;
+    let mut cp_lock = state.campaign_priority.lock().await;
     *cp_lock = priority_map;
     drop(cp_lock);
 
-    let mut video_ids_lock = CHANNEL_IDS.lock().await;
+    let mut video_ids_lock = state.channel_ids.lock().await;
     *video_ids_lock = video_vec;
     drop(video_ids_lock);
     debug!("Drop video_ids_lock");
-    spawn_ws(client.access_token.clone().unwrap()).await;
+    spawn_ws(client.access_token.clone().unwrap(), state.clone()).await;
 
     tokio::spawn(async move {
         loop {
-            let channel_ids_lock = CHANNEL_IDS.lock().await;
+            let channel_ids_lock = state.channel_ids.lock().await;
             let count = channel_ids_lock.len();
             drop(channel_ids_lock);
             if count < MAX_TOPICS {
@@ -108,7 +108,7 @@ pub async fn filter_streams (client: Arc<TwitchClient>, campaigns_arc: Arc<Mutex
                 let campaigns = campaigns_arc.lock().await.clone();
                 for campaign_queue in campaigns.iter() {
                     for campaign in campaign_queue {
-                        let allow_channels = ALLOW_CHANNELS.lock().await;
+                        let allow_channels = state.allow_channeld.lock().await;
                         if let Some(channels) = allow_channels.get(&campaign.id) {
                             for channel in channels {
                                 if to_add.len() + count  >= MAX_TOPICS {
@@ -128,7 +128,7 @@ pub async fn filter_streams (client: Arc<TwitchClient>, campaigns_arc: Arc<Mutex
                                 }
                             }
                         } else {
-                            let mut default_channels = DEFAULT_CHANNELS.lock().await;
+                            let mut default_channels = state.default_channels.lock().await;
                             let slug = retry!(client.get_slug(&campaign.game.displayName));
                             let game_directory = retry!(client.get_game_directory(&slug, 30, true));
                             let game_directory: HashSet<GameDirectory> = game_directory.into_iter().collect();
@@ -163,7 +163,7 @@ pub async fn filter_streams (client: Arc<TwitchClient>, campaigns_arc: Arc<Mutex
                     }   
                 }
 
-                let mut channel_ids_lock = CHANNEL_IDS.lock().await;
+                let mut channel_ids_lock = state.channel_ids.lock().await;
                 let mut cur = channel_ids_lock.len();
                 for channel in to_add {
                     if cur >= MAX_TOPICS { 
@@ -181,14 +181,14 @@ pub async fn filter_streams (client: Arc<TwitchClient>, campaigns_arc: Arc<Mutex
 }
 
 //ws_logick
-async fn spawn_ws (auth_token: String) {
+async fn spawn_ws (auth_token: String, state: Arc<AppState>) {
     tokio::spawn(async move {
         loop {
             let (ws_stream, _) = retry!(connect_async(WS_URL));
             let (mut write, mut read) = ws_stream.split();
             let mut send_channels: HashSet<Channel> = HashSet::new();
             loop {
-                let channel_ids = CHANNEL_IDS.lock().await;
+                let channel_ids = state.channel_ids.lock().await;
                 let new_channels: Vec<Channel> = channel_ids.iter().filter(|id| !send_channels.contains(*id)).cloned().collect();
                 let delete_channels: Vec<Channel> = send_channels.iter().filter(|id| !channel_ids.contains(&id)).cloned().collect();
                 drop(channel_ids);
@@ -204,7 +204,7 @@ async fn spawn_ws (auth_token: String) {
                     });
                     let payload = serde_json::to_string(&payload).unwrap();
                     let payload = tokio_tungstenite::tungstenite::Message::Text(payload.into());
-                    write.send(payload).await.unwrap_or_else(|e| tracing::error!("Failed to send payload to WebSocket: {e}"));
+                    write.send(payload).await.unwrap_or_else(|e| error!("Failed to send payload to WebSocket: {e}"));
                     send_channels.extend(new_channels);
                 }
 
@@ -219,7 +219,7 @@ async fn spawn_ws (auth_token: String) {
                     });
                     let payload = serde_json::to_string(&payload).unwrap();
                     let payload = tokio_tungstenite::tungstenite::Message::Text(payload.into());
-                    write.send(payload).await.unwrap_or_else(|e| tracing::error!("Failed to send payload to WebSocket: {e}"));
+                    write.send(payload).await.unwrap_or_else(|e| error!("Failed to send payload to WebSocket: {e}"));
                     for delete in delete_channels {
                         send_channels.remove(&delete);
                     }
@@ -237,20 +237,20 @@ async fn spawn_ws (auth_token: String) {
                             let json: Value = serde_json::from_str(&text).unwrap();
                             if let Some(err) = json.get("error").and_then(|e| e.as_str()) {
                                 if !err.is_empty() {
-                                    tracing::error!("{err}")
+                                    error!("{err}")
                                 }
                                 continue;
                             } else {
-                                let data = check_json(&json, "data").unwrap_or_else(|e| {tracing::error!("{e}"); &Value::Null});
-                                let message = check_json(&data, "message").unwrap_or_else(|e| {tracing::error!("{e}"); &Value::Null}).as_str().unwrap_or_default();
-                                let topic = check_json(data, "topic").unwrap_or_else(|e| { tracing::error!("{e}"); &Value::Null }).as_str().unwrap_or_default();
+                                let data = check_json(&json, "data").unwrap_or_else(|e| {error!("{e}"); &Value::Null});
+                                let message = check_json(&data, "message").unwrap_or_else(|e| {error!("{e}"); &Value::Null}).as_str().unwrap_or_default();
+                                let topic = check_json(data, "topic").unwrap_or_else(|e| {error!("{e}"); &Value::Null }).as_str().unwrap_or_default();
                                 let message_json: Value = serde_json::from_str(&message).unwrap();
                                 
                                 if let Some(viewers) = message_json.get("viewers").and_then(|s| s.as_u64()) {
                                     debug!("Stream {} has {} viewers", topic, viewers);
                                     if viewers == 0 {
                                         if let Some(id_str) = topic.split('.').last() {
-                                            let mut channel_ids = CHANNEL_IDS.lock().await;
+                                            let mut channel_ids = state.channel_ids.lock().await;
                                             if let Some(to_remove) = channel_ids.iter().find(|channel| channel.channel_id == id_str).cloned() {
                                                 channel_ids.remove(&to_remove);
                                             }
@@ -263,7 +263,7 @@ async fn spawn_ws (auth_token: String) {
                             }
 
                         },
-                        Ok(Message::Ping(ping)) => write.send(Message::Pong(ping)).await.unwrap_or_else(|e| tracing::error!("Failed to send PONG to WebSocket: {e}")),
+                        Ok(Message::Ping(ping)) => write.send(Message::Pong(ping)).await.unwrap_or_else(|e| error!("Failed to send PONG to WebSocket: {e}")),
                         Ok(_) => {},
                         Err(e) => {
                             debug!("WebSocket error: {e}");
@@ -313,14 +313,14 @@ async fn send_now_watched (mut stream_candidates_rx: Receiver<BinaryHeap<Priorit
                     if let Some(max) = watch.peek() {
                         debug!("Send: {}", max.name.channel_login);
                         if let Err(e) = tx_now_watch.send(Channel { channel_id: max.name.channel_id.to_string(), channel_login: max.name.channel_login.to_string() }) {
-                            tracing::error!("{e}")
+                            error!("{e}")
                         };
                         notify.notified().await;
                         debug!("Notified to claim drops for: {}", max.name.channel_login);
 
                         loop {
                             if let Err(e) = tx_for_delete.send(max.name.clone()) {
-                                tracing::error!("{e}");
+                                error!("{e}");
                                 sleep(Duration::from_secs(5)).await;
                                 continue;
                             } else {
@@ -344,7 +344,7 @@ async fn send_now_watched (mut stream_candidates_rx: Receiver<BinaryHeap<Priorit
 const ALLOW_TIER: u32 = 10_000;
 const DEFAULT_TIER: u32 = 0;
 
-pub async fn update_stream (tx_now_watch: Sender<Channel>, notify: Arc<Notify>) {
+pub async fn update_stream (tx_now_watch: Sender<Channel>, notify: Arc<Notify>, state: Arc<AppState>) {
     tokio::spawn(async move {
         let mut old_channel_ids: HashSet<Channel> = HashSet::new();
         let mut watched: HashSet<Channel> = HashSet::new();
@@ -369,10 +369,10 @@ pub async fn update_stream (tx_now_watch: Sender<Channel>, notify: Arc<Notify>) 
         });
 
         loop {
-            let channel_ids = CHANNEL_IDS.lock().await.clone();
-            let allow_channels = ALLOW_CHANNELS.lock().await.clone();
-            let default_channels = DEFAULT_CHANNELS.lock().await.clone();
-            let campaign_priority = CAMPAIGN_PRIORITY.lock().await.clone();
+            let channel_ids = state.channel_ids.lock().await.clone();
+            let allow_channels = state.allow_channeld.lock().await.clone();
+            let default_channels = state.default_channels.lock().await.clone();
+            let campaign_priority = state.campaign_priority.lock().await.clone();
 
             if channel_ids.is_empty() || (allow_channels.is_empty() && default_channels.is_empty()) {
                 sleep(Duration::from_secs(UPDATE_TIME)).await;
@@ -438,7 +438,7 @@ pub async fn update_stream (tx_now_watch: Sender<Channel>, notify: Arc<Notify>) 
                 watched.clear();
 
                 let pause = if empty_cycles >= 3 {
-                    tracing::warn!("No streams found for 3 cycles, pausing updates for 45 seconds");
+                    warn!("No streams found for 3 cycles, pausing updates for 45 seconds");
                     empty_cycles = 0;
                     Duration::from_secs(45)
                 } else {

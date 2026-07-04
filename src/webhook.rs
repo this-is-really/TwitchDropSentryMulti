@@ -1,6 +1,7 @@
 use rand::{rng, seq::IndexedRandom};
 use reqwest::{Client, Proxy};
 use serde_json::json;
+use tracing::error;
 use tokio::sync::mpsc::Receiver;
 
 pub struct WebhookSendFormat {
@@ -20,12 +21,12 @@ pub async fn webhook_message_worker(wh_url: String, mut info_rx: Receiver<Webhoo
         match Proxy::all(proxy_str) {
             Ok(p) => {
                 Client::builder().proxy(p).build().unwrap_or_else(|e| {
-                    tracing::error!("Failed to build client with proxy: {}", e);
+                    error!("Failed to build client with proxy: {}", e);
                     Client::new()
                 })
             },
             Err(e) => {
-                tracing::error!("Proxy error {}: {}", proxy_str, e);
+                error!("Proxy error {}: {}", proxy_str, e);
                 Client::new()
             }
         }
@@ -79,7 +80,7 @@ pub async fn webhook_message_worker(wh_url: String, mut info_rx: Receiver<Webhoo
             });
 
             if let Err(e) = client.post(&wh_url).json(&payload).send().await {
-                tracing::error!("{e}")
+                error!("{e}")
             };
         }
     });

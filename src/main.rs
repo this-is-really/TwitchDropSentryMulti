@@ -3,7 +3,7 @@ use std::{collections::{BTreeMap, HashMap, HashSet, VecDeque}, error::Error, pat
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use rand::{RngExt, SeedableRng, rng, rngs::SmallRng, seq::{IndexedRandom, SliceRandom}};
 use tokio::{fs::{self}, sync::{Mutex, Notify, broadcast::{self, Receiver, error::TryRecvError}, watch::Sender}, time::sleep};
-use tracing::{debug, info, level_filters::LevelFilter};
+use tracing::{debug, info, error, warn, level_filters::LevelFilter};
 use tracing_appender::rolling;
 use tracing_subscriber::fmt::{time::ChronoLocal, writer::BoxMakeWriter};
 use twitch_gql_rs::{TwitchClient, client_type::ClientType, error::ClaimDropError, structs::{DropCampaigns}};
@@ -18,7 +18,7 @@ use crate::{config::*, r#static::*, stream::*, webhook::{WebhookSendFormat, webh
 const STREAM_SLEEP: u64 = 59;
 const MAX_COUNT: u64 = 3;
 
-async fn create_client (home_dir: &Path, proxies: &[String]) -> Result<(), Box<dyn Error>> {
+async fn create_client (home_dir: &Path, proxies: &[String], state: &AppState) -> Result<(), Box<dyn Error>> {
     let random_proxy = proxies.choose(&mut rng()).cloned();
 
     let client_type = ClientType::android_app();
@@ -28,7 +28,7 @@ async fn create_client (home_dir: &Path, proxies: &[String]) -> Result<(), Box<d
     loop {
         count += 1;
         if count >= MAX_COUNT {
-            tracing::warn!("Authentication failed: maximum retry attempts ({MAX_COUNT}) reached.");
+            warn!("Authentication failed: maximum retry attempts ({MAX_COUNT}) reached.");
             return Ok(());
         }
         info!("Starting Twitch device authentication (attempt {count}/{MAX_COUNT})");
@@ -37,11 +37,11 @@ async fn create_client (home_dir: &Path, proxies: &[String]) -> Result<(), Box<d
         match client.auth(get_auth).await {
             Ok(_) => break,
             Err(twitch_gql_rs::error::AuthError::DeviceTokenExpired) => {
-                tracing::warn!("Device authentication token expired. Requesting a new one (attempt {count}/{MAX_COUNT})...");
+                warn!("Device authentication token expired. Requesting a new one (attempt {count}/{MAX_COUNT})...");
                 continue
             },
             Err(twitch_gql_rs::error::AuthError::TwitchError(e)) => {
-                tracing::error!("Twitch returned an error during authentication: {e}");
+                error!("Twitch returned an error during authentication: {e}");
                 return Ok(());
             }
         }
@@ -54,7 +54,7 @@ async fn create_client (home_dir: &Path, proxies: &[String]) -> Result<(), Box<d
     let client = TwitchClient::load_from_file(&path, &random_proxy).await?;
     let login = client.login.clone().unwrap_or_default();
 
-    let mut accounts = ACCOUNTS.lock().await;
+    let mut accounts = state.accounts.lock().await;
     let already_exists = if let Some(accs) = &*accounts {
         accs.iter().any(|c| c.login.as_ref().map_or(false, |l| l == &login))
     } else {
@@ -119,15 +119,16 @@ async fn main () -> Result<(), Box<dyn Error>> {
                 let new_path = delete_dir.join(path.file_name().unwrap_or_default());
                 client.save_file(&new_path).await?;
                 fs::remove_file(&path).await?;
-                tracing::error!("Failed to load client from file {}: {e}", path.display());
+                error!("Failed to load client from file {}: {e}", path.display());
                 continue;
             }
             loaded_clients.push(Arc::new(client));
         }
     }
 
+    let global_state = Arc::new(AppState::default());
     if !loaded_clients.is_empty() {
-        let mut lock = ACCOUNTS.lock().await;
+        let mut lock = global_state.accounts.lock().await;
         *lock = Some(loaded_clients);
     }
 
@@ -143,10 +144,10 @@ async fn main () -> Result<(), Box<dyn Error>> {
 
         match select {
             0 => {
-                create_client(&home_dir, &proxies).await?
+                create_client(&home_dir, &proxies, &global_state).await?
             },
             1 => {
-                let clients = ACCOUNTS.lock().await;
+                let clients = global_state.accounts.lock().await;
                 let client = if let Some(accounts) = clients.clone() {
                     accounts.first().cloned().ok_or("No accounts found")?
                 } else {
@@ -173,14 +174,14 @@ async fn main () -> Result<(), Box<dyn Error>> {
                     grouped.entry(idx).or_default().push_front(obj);
                 }
 
-                main_logic(client, grouped, home_dir, &games, config.discord_webhook_url.clone(), &proxies).await?;
+                main_logic(client, grouped, home_dir, &games, config.discord_webhook_url.clone(), &proxies, global_state.clone()).await?;
             },
             _ => {}
         } 
     }
 }
 
-async fn main_logic (client: Arc<TwitchClient> ,grouped: BTreeMap<usize, VecDeque<DropCampaigns>>, home_dir: &Path, games: &VecDeque<String>, webhook_url: String, proxies: &[String]) -> Result<(), Box<dyn Error>> {
+async fn main_logic (client: Arc<TwitchClient> ,grouped: BTreeMap<usize, VecDeque<DropCampaigns>>, home_dir: &Path, games: &VecDeque<String>, webhook_url: String, proxies: &[String], global_state: Arc<AppState>) -> Result<(), Box<dyn Error>> {
     let query_games: VecDeque<VecDeque<DropCampaigns>> = if !games.is_empty() {
         games.iter().filter_map(|game_name| {
             let campaigns_for_game: VecDeque<DropCampaigns> = grouped.values().flat_map(|campaigns_vec| {
@@ -198,7 +199,7 @@ async fn main_logic (client: Arc<TwitchClient> ,grouped: BTreeMap<usize, VecDequ
     };
 
     if query_games.is_empty() && !games.is_empty() {
-        tracing::info!("No active campaigns found for the games in config. Retrying in 10 minutes...");
+        info!("No active campaigns found for the games in config. Retrying in 10 minutes...");
         sleep(Duration::from_secs(10*60)).await;
         return Ok(());
     }
@@ -225,13 +226,12 @@ async fn main_logic (client: Arc<TwitchClient> ,grouped: BTreeMap<usize, VecDequ
     let drop_campaigns = Arc::new(Mutex::new(current_campaigns.clone()));
     let drop_cash_dir = home_dir.join("cash.json");
 
-    let clients = ACCOUNTS.lock().await;
+    let clients = global_state.accounts.lock().await;
     let clients = if let Some(accounts) = clients.clone() {
         accounts
     } else {
         return Err("Didn't find accounts")?;
     };
-
 
     let weebhook_is_active = if !webhook_url.is_empty() {
         webhook_message_worker(webhook_url, webhook_rx, proxies).await;
@@ -241,16 +241,16 @@ async fn main_logic (client: Arc<TwitchClient> ,grouped: BTreeMap<usize, VecDequ
     };
     watch_sync(clients.clone(), channel_rx, notify.clone()).await;
     info!("Watch synchronization task has been successfully initiated");
-    drop_sync(clients.clone(), drop_id_tx, drop_cash_dir, channel_rx2, notify.clone(), webhook_tx, weebhook_is_active).await;
+    drop_sync(clients.clone(), drop_id_tx, drop_cash_dir, channel_rx2, notify.clone(), webhook_tx, weebhook_is_active, global_state.clone()).await;
     info!("Drop progress tracker is active");
-    filter_streams(client.clone(), drop_campaigns.clone()).await;
+    filter_streams(client.clone(), drop_campaigns.clone(), global_state.clone()).await;
     info!("Stream filtering has begun");
-    update_stream(channel_tx, notify).await;
+    update_stream(channel_tx, notify, global_state.clone()).await;
     info!("Stream priority updated");
 
     let pending_drops = Arc::new(Mutex::new(HashSet::new()));
     {
-        let cash = DROP_CACHE.lock().await.clone();
+        let cash = global_state.drop_cache.lock().await.clone();
         let mut pd_lock = pending_drops.lock().await;
 
         for game_campaign in current_campaigns {
@@ -275,15 +275,16 @@ async fn main_logic (client: Arc<TwitchClient> ,grouped: BTreeMap<usize, VecDequ
         let pending_drops_clone = pending_drops.clone();
         let mut rng = rng();
         let mut rng = SmallRng::from_rng(&mut rng);
+        let global_state_clone = global_state.clone();
         tokio::spawn(async move {
             loop {
                 let jitter = rng.random_range(15..=30);
                 sleep(Duration::from_secs(jitter * 60)).await;
-                tracing::info!("Refreshing campaign data...");
+                info!("Refreshing campaign data...");
                 let campaign_res = match client.get_campaign().await {
                     Ok(c) => c,
                     Err(e) => {
-                        tracing::error!("Failed to refresh campaign data: {e}");
+                        error!("Failed to refresh campaign data: {e}");
                         continue;
                     }
                 };
@@ -318,7 +319,7 @@ async fn main_logic (client: Arc<TwitchClient> ,grouped: BTreeMap<usize, VecDequ
                 }).collect();
 
                 if new_query_games.is_empty() {
-                    tracing::info!("No active campaigns found for the configured games. Will check again in 10 minutes...");
+                    info!("No active campaigns found for the configured games. Will check again in 10 minutes...");
                     continue;
                 }
 
@@ -331,7 +332,7 @@ async fn main_logic (client: Arc<TwitchClient> ,grouped: BTreeMap<usize, VecDequ
                 }
 
                 {
-                    let mut lock = CAMPAIGN_PRIORITY.lock().await;
+                    let mut lock = global_state_clone.campaign_priority.lock().await;
                     *lock = priority_map;
                 }
 
@@ -340,14 +341,14 @@ async fn main_logic (client: Arc<TwitchClient> ,grouped: BTreeMap<usize, VecDequ
                     *lock = new_query_games.clone();
                 }
 
-                let cash = DROP_CACHE.lock().await.clone();
+                let cash = global_state_clone.drop_cache.lock().await.clone();
                 let mut new_pending = HashSet::new();
 
                 for game_campaign in new_query_games {
                     for camp in game_campaign {
                         if let Ok(mut campaign_details) = client.get_campaign_details(&camp.id).await {
                             if let Some(allow) = &campaign_details.allow.channels {
-                                let mut allow_lock = ALLOW_CHANNELS.lock().await;
+                                let mut allow_lock = global_state_clone.allow_channeld.lock().await;
                                 let allow_set = allow.clone().into_iter().collect();
                                 allow_lock.insert(camp.id.clone(), allow_set);
                             }
@@ -407,15 +408,15 @@ async fn watch_sync (clients: Vec<Arc<TwitchClient>>, rx: Receiver<Channel>, not
             let mut watching = match rx.recv().await {
                 Ok(w) => w,
                 Err(e) => {
-                    tracing::debug!("{e}");
-                    tracing::error!("Failed to receive initial channel to watch. Watch synchronization will not start for this client");
+                    debug!("{e}");
+                    error!("Failed to receive initial channel to watch. Watch synchronization will not start for this client");
                     return ;
                 }  
             };
             loop {
                 match rx.try_recv() {
                     Ok(channel) => watching = channel,
-                    Err(TryRecvError::Closed) => tracing::error!("Closed"),
+                    Err(TryRecvError::Closed) => error!("Closed"),
                     Err(_) => {}
                 };
 
@@ -448,7 +449,7 @@ async fn watch_sync (clients: Vec<Arc<TwitchClient>>, rx: Receiver<Channel>, not
                         sleep(Duration::from_secs(STREAM_SLEEP)).await
                     },
                     Err(e) => {
-                        tracing::error!("{e}");
+                        error!("{e}");
                         sleep(Duration::from_secs(STREAM_SLEEP)).await;
                     }
                 }
@@ -457,11 +458,11 @@ async fn watch_sync (clients: Vec<Arc<TwitchClient>>, rx: Receiver<Channel>, not
     }
 }
 
-async fn drop_sync(clients: Vec<Arc<TwitchClient>>, tx: Sender<String>, cache_path: PathBuf, rx_watch: broadcast::Receiver<Channel>, notify: Arc<Notify>, webhook_tx: tokio::sync::mpsc::Sender<WebhookSendFormat>, webhook_is_active: bool) {
+async fn drop_sync(clients: Vec<Arc<TwitchClient>>, tx: Sender<String>, cache_path: PathBuf, rx_watch: broadcast::Receiver<Channel>, notify: Arc<Notify>, webhook_tx: tokio::sync::mpsc::Sender<WebhookSendFormat>, webhook_is_active: bool, state: Arc<AppState>) {
     if !cache_path.exists() {
         retry!(fs::write(&cache_path, "{}"));
     } else {
-        let mut cache = DROP_CACHE.lock().await;
+        let mut cache = state.drop_cache.lock().await;
         let cache_str = retry!(fs::read_to_string(&cache_path));
         let cache_vec: HashMap<String, HashSet<String>> = serde_json::from_str(&cache_str).unwrap();
         *cache = cache_vec;
@@ -477,6 +478,7 @@ async fn drop_sync(clients: Vec<Arc<TwitchClient>>, tx: Sender<String>, cache_pa
         let webhook_tx = webhook_tx.clone();
         let cache_path = cache_path.clone();
         let bars = bars.clone();
+        let state_clone = state.clone();
 
         tokio::spawn(async move {
             let mut last_claimed = String::new();
@@ -509,13 +511,13 @@ async fn drop_sync(clients: Vec<Arc<TwitchClient>>, tx: Sender<String>, cache_pa
 
                 let should_claim = !drop_progress.dropID.is_empty() && drop_progress.currentMinutesWatched >= drop_progress.requiredMinutesWatched && drop_progress.dropID != last_claimed;
 
-                let mut cache = DROP_CACHE.lock().await;
+                let mut cache = state_clone.drop_cache.lock().await;
 
                 if should_claim {
                     retry!(claim_drop(&client, &drop_progress.dropID));
                     info!("Drop claimed: {}", drop_progress.dropID);
 
-                    tx.send(drop_progress.dropID.clone()).unwrap_or_else(|_| tracing::error!("tx closed"));
+                    tx.send(drop_progress.dropID.clone()).unwrap_or_else(|_| error!("tx closed"));
 
                     cache.entry(client.user_id.clone().unwrap_or_default()).or_default().insert(drop_progress.dropID.clone());
 
@@ -524,7 +526,7 @@ async fn drop_sync(clients: Vec<Arc<TwitchClient>>, tx: Sender<String>, cache_pa
                     let cache_string = match serde_json::to_string_pretty(&*cache) {
                         Ok(s) => s,
                         Err(e) => {
-                            tracing::error!("Failed to serialize cache to JSON: {e}");
+                            error!("Failed to serialize cache to JSON: {e}");
                             continue;
                         }
                     };
@@ -599,7 +601,7 @@ async fn drop_sync(clients: Vec<Arc<TwitchClient>>, tx: Sender<String>, cache_pa
                     debug!("Not claiming yet: dropID: {}, currentMinutesWatched: {}, requiredMinutesWatched: {}, lastClaimed: {}", drop_progress.dropID, drop_progress.currentMinutesWatched, drop_progress.requiredMinutesWatched, last_claimed);
                     notify.notify_one();
                     if drop_progress.dropID.is_empty() {
-                        let mut lock = CHANNEL_IDS.lock().await;
+                        let mut lock = state_clone.channel_ids.lock().await;
                         lock.retain(|c| c.channel_id != watching.channel_id);
                     }
                 }
@@ -621,7 +623,7 @@ async fn claim_drop (client: &Arc<TwitchClient>, drop_progress_id: &str) -> Resu
                             match client.claim_drop(&id).await {
                                 Ok(_) => return Ok(()),
                                 Err(ClaimDropError::DropAlreadyClaimed) => return Ok(()),
-                                Err(e) => tracing::error!("{e}")
+                                Err(e) => error!("{e}")
                             }
                         }
                     }
