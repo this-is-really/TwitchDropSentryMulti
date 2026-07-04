@@ -143,17 +143,22 @@ async fn main () -> Result<(), Box<dyn Error>> {
     }
 
     let global_state = Arc::new(AppState::default());
-    if !loaded_clients.is_empty() {
-        let mut lock = global_state.accounts.lock().await;
-        *lock = Some(loaded_clients);
-    }
+    let have_accounts = if !loaded_clients.is_empty() {
+        let mut accounts_lock = global_state.accounts.lock().await;
+        *accounts_lock = Some(loaded_clients);
+        true
+    } else {
+        false
+    };
 
     let games = config.loaded_games().await?;
 
     let items = vec!["Add account", "Start farming"];
     loop {
-        let select = if !games.is_empty() {
+        let select = if !games.is_empty() && have_accounts {
             1
+        } else if !have_accounts {
+            0
         } else {
             dialoguer::Select::new().with_prompt("Select option").items(&items).default(0).interact()?
         };
