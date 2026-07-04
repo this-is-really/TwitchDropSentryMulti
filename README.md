@@ -72,7 +72,7 @@ All settings are now in one clean file:
 **Notifications preview:**  
 ![Webhook notifications](assets/webhook.png)
 
-### Account Validation (NEW in 1.0.4)
+### Account Validation (since in 1.0.4)
 - DropSentry checks the health of every account on startup and periodically while farming.
 - A real request is sent to Twitch for each account - if Twitch responds with an error (ban, expired session, invalid credentials), the account is flagged as invalid.
 - Invalid accounts are automatically moved to the **`delete_accounts/`** folder, so your active accounts list stays clean without any manual intervention.
