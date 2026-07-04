@@ -2,7 +2,7 @@ use std::{collections::{BTreeMap, HashMap, HashSet, VecDeque}, error::Error, pat
 
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use rand::{RngExt, SeedableRng, rng, rngs::SmallRng, seq::{IndexedRandom, SliceRandom}};
-use tokio::{fs::{self}, sync::{Mutex, Notify, broadcast::{self, Receiver, error::TryRecvError}, watch::Sender}, time::sleep};
+use tokio::{fs::{self}, sync::{Mutex, Notify, mpsc, watch::Sender}, time::sleep};
 use tracing::{debug, info, error, warn, level_filters::LevelFilter};
 use tracing_appender::rolling;
 use tracing_subscriber::fmt::{time::ChronoLocal, writer::BoxMakeWriter};
@@ -71,6 +71,22 @@ async fn create_client (home_dir: &Path, proxies: &[String], state: &AppState) -
         None => *accounts = Some(vec![Arc::new(client.clone())])
     }
     Ok(())
+}
+
+fn group_campaigns (campaign: Vec<DropCampaigns>, current_id_to_index: &mut HashMap<String, usize>, current_grouped: &mut BTreeMap<usize, VecDeque<DropCampaigns>>) {
+    let mut next_index: usize = 0;
+    for obj in campaign {
+        if obj.status == "EXPIRED" {
+            continue;
+        }
+        let idx = *current_id_to_index.entry(obj.game.id.clone()).or_insert_with(|| {
+            let i = next_index;
+            next_index += 1;
+            i
+        });
+
+        current_grouped.entry(idx).or_default().push_front(obj);
+    }
 }
 
 #[tokio::main]
@@ -160,19 +176,7 @@ async fn main () -> Result<(), Box<dyn Error>> {
 
                 let mut id_to_index = HashMap::new();
                 let mut grouped: BTreeMap<usize, VecDeque<DropCampaigns>> = BTreeMap::new();
-                let mut next_index: usize = 0;
-                for obj in campaign {
-                    if obj.status == "EXPIRED" {
-                        continue;
-                    }
-                    let idx = *id_to_index.entry(obj.game.id.clone()).or_insert_with(|| {
-                        let i = next_index;
-                        next_index += 1;
-                        i
-                    });
-
-                    grouped.entry(idx).or_default().push_front(obj);
-                }
+                group_campaigns(campaign, &mut id_to_index, &mut grouped);
 
                 main_logic(client, grouped, home_dir, &games, config.discord_webhook_url.clone(), &proxies, global_state.clone()).await?;
             },
@@ -217,9 +221,9 @@ async fn main_logic (client: Arc<TwitchClient> ,grouped: BTreeMap<usize, VecDequ
         vec![selected].into()
     };
 
-    let (webhook_tx, webhook_rx) = tokio::sync::mpsc::channel(100);
+    let (webhook_tx, webhook_rx) = mpsc::channel(10);
     let (drop_id_tx, mut drop_id_rx) = tokio::sync::watch::channel(String::new());
-    let (channel_tx, channel_rx) = broadcast::channel(100);
+    let (channel_tx, channel_rx) = tokio::sync::watch::channel(Option::<Channel>::None);
     let channel_rx2 = channel_tx.subscribe();
 
     let notify = Arc::new(Notify::new());
@@ -292,19 +296,7 @@ async fn main_logic (client: Arc<TwitchClient> ,grouped: BTreeMap<usize, VecDequ
                 let campaign = campaign_res.dropCampaigns;
                 let mut id_to_index = HashMap::new();
                 let mut grouped: BTreeMap<usize, VecDeque<DropCampaigns>> = BTreeMap::new();
-                let mut next_index: usize = 0;
-                for obj in campaign {
-                    if obj.status == "EXPIRED" {
-                        continue;
-                    }
-                    let idx = *id_to_index.entry(obj.game.id.clone()).or_insert_with(|| {
-                        let i = next_index;
-                        next_index += 1;
-                        i
-                    });
-
-                    grouped.entry(idx).or_default().push_front(obj);
-                }
+                group_campaigns(campaign, &mut id_to_index, &mut grouped);
 
                 let new_query_games: VecDeque<VecDeque<DropCampaigns>> = games_clone.iter().filter_map(|game_name| {
                     let campaigns_for_game: VecDeque<DropCampaigns> = grouped.values().flat_map(|campaigns_vec| {
@@ -348,7 +340,7 @@ async fn main_logic (client: Arc<TwitchClient> ,grouped: BTreeMap<usize, VecDequ
                     for camp in game_campaign {
                         if let Ok(mut campaign_details) = client.get_campaign_details(&camp.id).await {
                             if let Some(allow) = &campaign_details.allow.channels {
-                                let mut allow_lock = global_state_clone.allow_channeld.lock().await;
+                                let mut allow_lock = global_state_clone.allow_channels.lock().await;
                                 let allow_set = allow.clone().into_iter().collect();
                                 allow_lock.insert(camp.id.clone(), allow_set);
                             }
@@ -397,27 +389,28 @@ async fn main_logic (client: Arc<TwitchClient> ,grouped: BTreeMap<usize, VecDequ
     Ok(())
 }
 
-async fn watch_sync (clients: Vec<Arc<TwitchClient>>, rx: Receiver<Channel>, notify: Arc<Notify>) {
+async fn watch_sync (clients: Vec<Arc<TwitchClient>>, rx: tokio::sync::watch::Receiver<Option<Channel>>, notify: Arc<Notify>) {
     for client in clients {
-        let mut rx = rx.resubscribe();
         let notify = notify.clone();
+        let mut watch_rx = rx.clone();
         tokio::spawn(async move {
             let mut old_stream_name = String::new();
             let mut now_watching_stream: Option<(String, String, String)> = None;
-
-            let mut watching = match rx.recv().await {
-                Ok(w) => w,
-                Err(e) => {
-                    debug!("{e}");
-                    error!("Failed to receive initial channel to watch. Watch synchronization will not start for this client");
-                    return ;
-                }  
-            };
             loop {
-                match rx.try_recv() {
-                    Ok(channel) => watching = channel,
-                    Err(TryRecvError::Closed) => error!("Closed"),
-                    Err(_) => {}
+                let watching = {
+                    let current = watch_rx.borrow();
+                    current.clone()
+                };
+
+                let watching = match watching {
+                    Some(w) => w,
+                    None => {
+                        tokio::select! {
+                            _ = watch_rx.changed() => {},
+                            _ = sleep(Duration::from_secs(STREAM_SLEEP)) => {},
+                        };
+                        continue;
+                    }
                 };
 
                 if old_stream_name.is_empty() || old_stream_name != watching.channel_login {
@@ -438,7 +431,10 @@ async fn watch_sync (clients: Vec<Arc<TwitchClient>>, rx: Receiver<Channel>, not
                         } else {
                             debug!("Stream is not live: {}", watching.channel_login);
                             notify.notify_one();
-                            sleep(Duration::from_secs(STREAM_SLEEP)).await;
+                            tokio::select! {
+                                _ = watch_rx.changed() => {},
+                                _ = sleep(Duration::from_secs(STREAM_SLEEP)) => {},
+                            };
                             continue;
                         }
                     }
@@ -446,11 +442,17 @@ async fn watch_sync (clients: Vec<Arc<TwitchClient>>, rx: Receiver<Channel>, not
 
                 match client.send_watch(&watching.channel_login, &stream_id, &watching.channel_id, Some(&game_name), Some(&game_id)).await {
                     Ok(_) => {
-                        sleep(Duration::from_secs(STREAM_SLEEP)).await
+                        tokio::select! {
+                            _ = watch_rx.changed() => {},
+                            _ = sleep(Duration::from_secs(STREAM_SLEEP)) => {},
+                        };
                     },
                     Err(e) => {
                         error!("{e}");
-                        sleep(Duration::from_secs(STREAM_SLEEP)).await;
+                        tokio::select! {
+                            _ = watch_rx.changed() => {},
+                            _ = sleep(Duration::from_secs(STREAM_SLEEP)) => {},
+                        };
                     }
                 }
             }
@@ -458,7 +460,7 @@ async fn watch_sync (clients: Vec<Arc<TwitchClient>>, rx: Receiver<Channel>, not
     }
 }
 
-async fn drop_sync(clients: Vec<Arc<TwitchClient>>, tx: Sender<String>, cache_path: PathBuf, rx_watch: broadcast::Receiver<Channel>, notify: Arc<Notify>, webhook_tx: tokio::sync::mpsc::Sender<WebhookSendFormat>, webhook_is_active: bool, state: Arc<AppState>) {
+async fn drop_sync(clients: Vec<Arc<TwitchClient>>, tx: Sender<String>, cache_path: PathBuf, rx_watch: tokio::sync::watch::Receiver<Option<Channel>>, notify: Arc<Notify>, webhook_tx: mpsc::Sender<WebhookSendFormat>, webhook_is_active: bool, state: Arc<AppState>) {
     if !cache_path.exists() {
         retry!(fs::write(&cache_path, "{}"));
     } else {
@@ -472,13 +474,13 @@ async fn drop_sync(clients: Vec<Arc<TwitchClient>>, tx: Sender<String>, cache_pa
     let bars = Arc::new(MultiProgress::new());
 
     for client in clients {
-        let mut rx_watch = rx_watch.resubscribe();
         let notify = notify.clone();
         let tx = tx.clone();
         let webhook_tx = webhook_tx.clone();
         let cache_path = cache_path.clone();
         let bars = bars.clone();
         let state_clone = state.clone();
+        let mut rx_watch_clone = rx_watch.clone();
 
         tokio::spawn(async move {
             let mut last_claimed = String::new();
@@ -490,22 +492,24 @@ async fn drop_sync(clients: Vec<Arc<TwitchClient>>, tx: Sender<String>, cache_pa
             bar.set_message("Initialization...");
             bar.enable_steady_tick(Duration::from_millis(500));
 
-            let mut watching = match rx_watch.recv().await {
-                Ok(channel) => channel,
-                Err(_) => return,
-            };
             let mut last_drop_id = String::new();
 
             loop {
-                match rx_watch.try_recv() {
-                    Ok(new_watch) => {
-                        watching = new_watch;
-                        last_claimed.clear();
-                        last_drop_id.clear();
+                let watching = {
+                    let current = rx_watch_clone.borrow();
+                    current.clone()
+                };
+
+                let watching = match watching {
+                    Some(w) => w,
+                    None => {
+                        tokio::select! {
+                            _ = rx_watch_clone.changed() => {},
+                            _ = sleep(Duration::from_secs(30)) => {},
+                        };
+                        continue;
                     }
-                    Err(TryRecvError::Closed) => break,
-                    Err(_) => {}
-                }
+                };
 
                 let drop_progress = retry!(client.get_current_drop_progress_on_channel(&watching.channel_login));
 
@@ -601,12 +605,15 @@ async fn drop_sync(clients: Vec<Arc<TwitchClient>>, tx: Sender<String>, cache_pa
                     debug!("Not claiming yet: dropID: {}, currentMinutesWatched: {}, requiredMinutesWatched: {}, lastClaimed: {}", drop_progress.dropID, drop_progress.currentMinutesWatched, drop_progress.requiredMinutesWatched, last_claimed);
                     notify.notify_one();
                     if drop_progress.dropID.is_empty() {
-                        let mut lock = state_clone.channel_ids.lock().await;
-                        lock.retain(|c| c.channel_id != watching.channel_id);
+                        let mut channel_pool_lock = state_clone.channel_pool.lock().await;
+                        channel_pool_lock.retain(|c| c.channel_id != watching.channel_id);
                     }
                 }
 
-                sleep(Duration::from_secs(30)).await;
+                tokio::select! {
+                    _ = rx_watch_clone.changed() => {},
+                    _ = sleep(Duration::from_secs(30)) => {},
+                }
             }
         });
     }
@@ -614,7 +621,7 @@ async fn drop_sync(clients: Vec<Arc<TwitchClient>>, tx: Sender<String>, cache_pa
 
 async fn claim_drop (client: &Arc<TwitchClient>, drop_progress_id: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
     loop {
-        let inv = retry!(client.get_inventory());
+        let inv = client.get_inventory().await?;
         if let Some(campaigns_in_progress) = inv.inventory.dropCampaignsInProgress {
             for in_progress in campaigns_in_progress {
                 for time_based in in_progress.timeBasedDrops {
@@ -630,5 +637,6 @@ async fn claim_drop (client: &Arc<TwitchClient>, drop_progress_id: &str) -> Resu
                 }
             }
         }
+        sleep(Duration::from_secs(10)).await
     }
 }

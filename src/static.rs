@@ -15,9 +15,9 @@ const MAX_ATTEMPTS: u32 = 3;
 pub struct AppState {
     pub accounts: Mutex<Option<Vec<Arc<TwitchClient>>>>,
     pub drop_cache: Mutex<HashMap<String, HashSet<String>>>,
-    pub channel_ids: Mutex<HashSet<Channel>>,
+    pub channel_pool: Mutex<HashSet<Channel>>,
     pub default_channels: Mutex<HashMap<String, HashSet<GameDirectory>>>,
-    pub allow_channeld: Mutex<HashMap<String, HashSet<Channels>>>,
+    pub allow_channels: Mutex<HashMap<String, HashSet<Channels>>>,
     pub campaign_priority: Mutex<HashMap<String, u32>>
 }
 
