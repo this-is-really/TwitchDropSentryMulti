@@ -46,13 +46,13 @@ async fn create_client (home_dir: &Path, proxies: &[String], state: &AppState) -
             }
         }
     }
-    let path = home_dir.join(format!("{}.json", client.login.clone().unwrap()));
+    let path = home_dir.join(format!("{}.json", client.login.clone().expect("Login is required")));
     let path = Path::new(&path);
     if !path.exists() {
         client.save_file(&path).await?;
     }
     let client = TwitchClient::load_from_file(&path, &random_proxy).await?;
-    let login = client.login.clone().unwrap_or_default();
+    let login = client.login.clone().expect("Login is required");
 
     let mut accounts = state.accounts.lock().await;
     let already_exists = if let Some(accs) = &*accounts {
@@ -471,7 +471,7 @@ async fn drop_sync(clients: Vec<Arc<TwitchClient>>, tx: Sender<String>, cache_pa
     } else {
         let mut cache = state.drop_cache.lock().await;
         let cache_str = retry!(fs::read_to_string(&cache_path));
-        let cache_vec: HashMap<String, HashSet<String>> = serde_json::from_str(&cache_str).unwrap();
+        let cache_vec: HashMap<String, HashSet<String>> = serde_json::from_str(&cache_str).expect("Failed to deserialize cache from JSON");
         *cache = cache_vec;
         drop(cache);
     }
@@ -493,7 +493,7 @@ async fn drop_sync(clients: Vec<Arc<TwitchClient>>, tx: Sender<String>, cache_pa
 
             //bar
             let bar = bars.add(ProgressBar::new(1));
-            bar.set_style(ProgressStyle::with_template("[{bar:40.cyan/blue}] {percent:.1}% ({pos}/{len} min) {msg}").unwrap());
+            bar.set_style(ProgressStyle::with_template("[{bar:40.cyan/blue}] {percent:.1}% ({pos}/{len} min) {msg}").expect("Failed to create progress bar style"));
             bar.set_message("Initialization...");
             bar.enable_steady_tick(Duration::from_millis(500));
 

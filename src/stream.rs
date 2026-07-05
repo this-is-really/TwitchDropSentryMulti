@@ -1,4 +1,4 @@
-use std::{collections::{BinaryHeap, HashMap, HashSet, VecDeque}, error::Error, sync::Arc, time::Duration};
+use std::{collections::{BinaryHeap, HashMap, HashSet, VecDeque}, sync::Arc, time::Duration};
 
 use tokio::sync::{Mutex, Notify, watch::Receiver};
 
@@ -96,7 +96,7 @@ pub async fn filter_streams (client: Arc<TwitchClient>, campaigns_arc: Arc<Mutex
     *video_ids_lock = video_vec;
     drop(video_ids_lock);
     debug!("Drop video_ids_lock");
-    spawn_ws(client.access_token.clone().unwrap(), state.clone()).await;
+    spawn_ws(client.access_token.clone().expect("Access token is required"), state.clone()).await;
 
     tokio::spawn(async move {
         loop {
@@ -202,7 +202,7 @@ async fn spawn_ws (auth_token: String, state: Arc<AppState>) {
                             "auth_token": auth_token
                         }
                     });
-                    let payload = serde_json::to_string(&payload).unwrap();
+                    let payload = serde_json::to_string(&payload).expect("json! macro production is guaranteed to be serializable");
                     let payload = tokio_tungstenite::tungstenite::Message::Text(payload.into());
                     write.send(payload).await.unwrap_or_else(|e| error!("Failed to send payload to WebSocket: {e}"));
                     send_channels.extend(new_channels);
@@ -217,7 +217,7 @@ async fn spawn_ws (auth_token: String, state: Arc<AppState>) {
                             "auth_token": auth_token
                         }
                     });
-                    let payload = serde_json::to_string(&payload).unwrap();
+                    let payload = serde_json::to_string(&payload).expect("json! macro production is guaranteed to be serializable");
                     let payload = tokio_tungstenite::tungstenite::Message::Text(payload.into());
                     write.send(payload).await.unwrap_or_else(|e| error!("Failed to send payload to WebSocket: {e}"));
                     for delete in delete_channels {
@@ -229,39 +229,58 @@ async fn spawn_ws (auth_token: String, state: Arc<AppState>) {
                     match msg {
                         Ok(Message::Text(text)) => {
                             debug!("Received WebSocket message: {text}");
-                            if text.contains("\"type\":\"PING\"") {
-                                debug!("Received PING from WebSocket, sending PONG");
-                                let pong = Message::Text("{\"type\":\"PONG\"}".into());
-                                write.send(pong).await.unwrap();
-                            }
-                            let json: Value = serde_json::from_str(&text).unwrap();
-                            if let Some(err) = json.get("error").and_then(|e| e.as_str()) {
-                                if !err.is_empty() {
-                                    error!("{err}")
+                            let json: Value = match serde_json::from_str(&text) {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    error!("Failed to parse JSON text: {e}");
+                                    continue;
                                 }
-                                continue;
-                            } else {
-                                let data = check_json(&json, "data").unwrap_or_else(|e| {error!("{e}"); &Value::Null});
-                                let message = check_json(&data, "message").unwrap_or_else(|e| {error!("{e}"); &Value::Null}).as_str().unwrap_or_default();
-                                let topic = check_json(data, "topic").unwrap_or_else(|e| {error!("{e}"); &Value::Null }).as_str().unwrap_or_default();
-                                let message_json: Value = serde_json::from_str(&message).unwrap();
-                                
-                                if let Some(viewers) = message_json.get("viewers").and_then(|s| s.as_u64()) {
-                                    debug!("Stream {} has {} viewers", topic, viewers);
-                                    if viewers == 0 {
-                                        if let Some(id_str) = topic.split('.').last() {
-                                            let mut channel_pool = state.channel_pool.lock().await;
-                                            if let Some(to_remove) = channel_pool.iter().find(|channel| channel.channel_id == id_str).cloned() {
-                                                channel_pool.remove(&to_remove);
-                                            }
-                                            send_channels.retain(|channel| channel.channel_id != id_str );
+                            };
+                            let msg_type = json.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                            match msg_type {
+                                "PING" => {
+                                    debug!("Received PING from WebSocket, sending PONG");
+                                    let pong = Message::Text("{\"type\":\"PONG\"}".into());
+                                    let _ = write.send(pong).await;
+                                    continue;
+                                },
+                                "PONG" => {continue;}
+                                "RECCONECT" => {
+                                    warn!("Received RECONNECT from WebSocket, reconnecting...");
+                                    break;
+                                },
+                                "RESPONSE" => {
+                                    if let Some(err) = json.get("error").and_then(|e| e.as_str()) {
+                                        if !err.is_empty() {
+                                            error!("WebSocket RESPONSE error: {err}");
                                         }
                                     }
-                                } else {
-                                    debug!("No viewers field in message for topic {}", topic);
-                                }
+                                    continue;
+                                },
+                                "MESSAGE" => {
+                                    if let Some(data) = json.get("data") {
+                                        let topic = data.get("topic").and_then(|t| t.as_str()).unwrap_or_default();
+                                        let message_str = data.get("message").and_then(|m| m.as_str()).unwrap_or_default();
+                                        if let Ok(message_json) = serde_json::from_str::<Value>(message_str) {
+                                            if let Some(viewers) = message_json.get("viewers").and_then(|v| v.as_u64()) {
+                                                debug!("Stream {} has {} viewers", topic, viewers);
+                                                if viewers == 0 {
+                                                    if let Some(id_str) = topic.split('.').last() {
+                                                        let mut channel_pool = state.channel_pool.lock().await;
+                                                        channel_pool.retain(|channel| channel.channel_id != id_str);
+                                                        send_channels.retain(|channel| channel.channel_id != id_str);
+                                                    }
+                                                }
+                                            } else {
+                                                debug!("No viewers field in message for topic {}", topic);
+                                            }
+                                        } else {
+                                            error!("Failed to parse message JSON for topic {}", topic);
+                                        }
+                                    }
+                                },
+                                _ => { debug!("Received unknown message type: {}", msg_type) }
                             }
-
                         },
                         Ok(Message::Ping(ping)) => write.send(Message::Pong(ping)).await.unwrap_or_else(|e| error!("Failed to send PONG to WebSocket: {e}")),
                         Ok(_) => {},
@@ -277,14 +296,6 @@ async fn spawn_ws (auth_token: String, state: Arc<AppState>) {
         
         
     });
-}
-
-fn check_json<'a>(v: &'a Value, data: &str) -> Result<&'a Value, Box<dyn Error>> {
-    if let Some(key) = v.get(&data) {
-        return Ok(key);
-    } else {
-        return Err(format!("Failed to find '{}' in JSON", data))?;
-    }
 }
 
 #[derive(PartialEq, Eq, Clone)]
