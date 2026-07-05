@@ -2,7 +2,7 @@ use std::{collections::{BinaryHeap, HashMap, HashSet, VecDeque}, sync::Arc, time
 
 use tokio::sync::{Mutex, Notify, watch::Receiver};
 
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{SinkExt, StreamExt, stream};
 use serde_json::{Value, json};
 use tokio::time::sleep;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
@@ -12,14 +12,29 @@ use twitch_gql_rs::{TwitchClient, structs::{Channels, DropCampaigns, GameDirecto
 use crate::{retry, r#static::{AppState, Channel, retry_backup}};
 
 const UPDATE_TIME: u64 = 45;
-const MAX_TOPICS: usize = 40;
+const MAX_TOPICS: usize = 120;
 const WS_URL: &'static str = "wss://pubsub-edge.twitch.tv/v1";
+
+async fn check_channel_stream(client: Arc<TwitchClient>, channel: Channel) -> Option<Channel> {
+    let stream_info = client.get_stream_info(&channel.channel_login).await.ok()?;
+    if stream_info.stream.is_none() {
+        return None;
+    }
+
+    match retry_backup(|| client.get_available_drops_for_channel(&channel.channel_id)).await {
+        Ok(drops) if drops.viewerDropCampaigns.is_some() => Some(channel),
+        Ok(_) => None,
+        Err(e) => {
+            error!("Failed to get available drops for channel {}: {}", channel.channel_login, e);
+            None
+        }
+    }
+}
 
 pub async fn filter_streams (client: Arc<TwitchClient>, campaigns_arc: Arc<Mutex<VecDeque<VecDeque<DropCampaigns>>>>, state: Arc<AppState>) {
     let campaigns = campaigns_arc.lock().await.clone();
-    let mut count = 0;
-    let mut video_vec = HashSet::new();
     let mut priority_map = HashMap::new();
+    let mut candidate_channels = Vec::new();
 
     for (game_idx, campaign_queue) in campaigns.iter().enumerate() {
         let base_prio = ((campaigns.len() - game_idx) * 10) as u32;
@@ -32,28 +47,10 @@ pub async fn filter_streams (client: Arc<TwitchClient>, campaigns_arc: Arc<Mutex
                 allow_channels.insert(campaign.id.to_string(), allow.clone());
                 drop(allow_channels);
                 for channel in allow {
-                    let stream_info = if let Ok(stream) = client.get_stream_info(&channel.name).await {
-                        stream
-                    } else {
-                        continue;
-                    };
-
-                    if stream_info.stream.is_some() {
-                        if count >= MAX_TOPICS {
-                            break;
-                        }
-                        let avaiable_drops = match retry_backup(|| client.get_available_drops_for_channel(&channel.id)).await {
-                            Ok(drops) => drops,
-                            Err(e) => {
-                                error!("{e}");
-                                continue;
-                            }
-                        };
-                        if avaiable_drops.viewerDropCampaigns.is_some() {
-                            video_vec.insert(Channel { channel_id: channel.id, channel_login: channel.name });
-                            count += 1
-                        }
-                    }
+                    candidate_channels.push(Channel { 
+                        channel_id: channel.id, 
+                        channel_login: channel.name 
+                    });
                 }
             } else {
                 let game_directory = retry!(client.get_game_directory(&campaign_details.game.slug, 30, true));
@@ -62,27 +59,10 @@ pub async fn filter_streams (client: Arc<TwitchClient>, campaigns_arc: Arc<Mutex
                 all_default.insert(campaign.id.to_string(), game_directory.clone());
                 drop(all_default);
                 for channel in game_directory {
-                    let stream_info = if let Ok(stream) = client.get_stream_info(&channel.broadcaster.login).await {
-                        stream
-                    } else {
-                        continue;
-                    };
-                    if count >= MAX_TOPICS {
-                        break;
-                    }
-                    if stream_info.stream.is_some() {
-                        let available_drops = match retry_backup(|| client.get_available_drops_for_channel(&channel.broadcaster.id)).await {
-                            Ok(drops) => drops,
-                            Err(e) => {
-                                error!("{e}");
-                                continue;
-                            }
-                        };
-                        if available_drops.viewerDropCampaigns.is_some() {
-                            video_vec.insert(Channel { channel_id: channel.broadcaster.id, channel_login: channel.broadcaster.login });
-                            count += 1
-                        }
-                    }
+                    candidate_channels.push(Channel { 
+                        channel_id: channel.broadcaster.id, 
+                        channel_login: channel.broadcaster.login 
+                    });
                 }
             }
         }
@@ -92,10 +72,20 @@ pub async fn filter_streams (client: Arc<TwitchClient>, campaigns_arc: Arc<Mutex
     *cp_lock = priority_map;
     drop(cp_lock);
 
-    let mut video_ids_lock = state.channel_pool.lock().await;
-    *video_ids_lock = video_vec;
-    drop(video_ids_lock);
-    debug!("Drop video_ids_lock");
+    let channel_pool: HashSet<Channel> = stream::iter(candidate_channels)
+        .map(|channel| {
+            let client_clone = client.clone();
+            async move { check_channel_stream(client_clone, channel).await }
+        })
+        .buffer_unordered(10)
+        .filter_map(|res| async move { res })
+        .take(MAX_TOPICS)
+        .collect().await;
+
+    let mut channel_pool_lock = state.channel_pool.lock().await;
+    *channel_pool_lock = channel_pool;
+    drop(channel_pool_lock);
+    debug!("Drop channel_pool updated with {} channels", state.channel_pool.lock().await.len());
     spawn_ws(client.access_token.clone().expect("Access token is required"), state.clone()).await;
 
     tokio::spawn(async move {
@@ -114,6 +104,7 @@ pub async fn filter_streams (client: Arc<TwitchClient>, campaigns_arc: Arc<Mutex
                                 if to_add.len() + count  >= MAX_TOPICS {
                                     break;
                                 }
+
                                 let stream_info = if let Ok(channel) = client.get_stream_info(&channel.name).await {
                                     channel
                                 } else {
@@ -292,9 +283,7 @@ async fn spawn_ws (auth_token: String, state: Arc<AppState>) {
                     }
                 }
             }
-        }
-        
-        
+        }   
     });
 }
 

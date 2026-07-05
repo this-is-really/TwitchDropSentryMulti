@@ -125,7 +125,7 @@ async fn main () -> Result<(), Box<dyn Error>> {
     let mut entries = fs::read_dir(&home_dir).await?;
     while let Some(entry) = entries.next_entry().await? {
         let path = entry.path();
-        if path.is_file() && path.extension().map_or(false, |s| s == "json" ) && path.file_name().unwrap_or_default() != "cash.json" && path.file_name().unwrap_or_default() != "config.json" {
+        if path.is_file() && path.extension().map_or(false, |s| s == "json" ) && path.file_name().unwrap_or_default() != "cache.json" && path.file_name().unwrap_or_default() != "config.json" {
             let selected_proxy = proxy_pool.next();
             let client = TwitchClient::load_from_file(&path, &selected_proxy.cloned()).await?;
             if let Err(e) = client.get_campaign().await {
@@ -233,7 +233,7 @@ async fn main_logic (client: Arc<TwitchClient> ,grouped: BTreeMap<usize, VecDequ
 
     let notify = Arc::new(Notify::new());
     let drop_campaigns = Arc::new(Mutex::new(current_campaigns.clone()));
-    let drop_cash_dir = home_dir.join("cash.json");
+    let drop_cache_dir = home_dir.join("cache.json");
 
     let clients = global_state.accounts.lock().await;
     let clients = if let Some(accounts) = clients.clone() {
@@ -250,7 +250,7 @@ async fn main_logic (client: Arc<TwitchClient> ,grouped: BTreeMap<usize, VecDequ
     };
     watch_sync(clients.clone(), channel_rx, notify.clone()).await;
     info!("Watch synchronization task has been successfully initiated");
-    drop_sync(clients.clone(), drop_id_tx, drop_cash_dir, channel_rx2, notify.clone(), webhook_tx, weebhook_is_active, global_state.clone()).await;
+    drop_sync(clients.clone(), drop_id_tx, drop_cache_dir, channel_rx2, notify.clone(), webhook_tx, weebhook_is_active, global_state.clone()).await;
     info!("Drop progress tracker is active");
     filter_streams(client.clone(), drop_campaigns.clone(), global_state.clone()).await;
     info!("Stream filtering has begun");
@@ -259,13 +259,13 @@ async fn main_logic (client: Arc<TwitchClient> ,grouped: BTreeMap<usize, VecDequ
 
     let pending_drops = Arc::new(Mutex::new(HashSet::new()));
     {
-        let cash = global_state.drop_cache.lock().await.clone();
+        let cache = global_state.drop_cache.lock().await.clone();
         let mut pd_lock = pending_drops.lock().await;
 
         for game_campaign in current_campaigns {
             for campaign in game_campaign {
                 let mut campaign_details = retry!(client.get_campaign_details(&campaign.id));
-                for (_, claimed_drops) in &cash {
+                for (_, claimed_drops) in &cache {
                     for drop_id_cache in claimed_drops {
                         if let Some(pos) = campaign_details.timeBasedDrops.iter().position(|d| d.id == *drop_id_cache) {
                             campaign_details.timeBasedDrops.remove(pos);
@@ -338,7 +338,7 @@ async fn main_logic (client: Arc<TwitchClient> ,grouped: BTreeMap<usize, VecDequ
                     *lock = new_query_games.clone();
                 }
 
-                let cash = global_state_clone.drop_cache.lock().await.clone();
+                let cache = global_state_clone.drop_cache.lock().await.clone();
                 let mut new_pending = HashSet::new();
 
                 for game_campaign in new_query_games {
@@ -350,7 +350,7 @@ async fn main_logic (client: Arc<TwitchClient> ,grouped: BTreeMap<usize, VecDequ
                                 allow_lock.insert(camp.id.clone(), allow_set);
                             }
 
-                            for (_, claimed_drops) in &cash {
+                            for (_, claimed_drops) in &cache {
                                 for drop_id_cache in claimed_drops {
                                     if let Some(pos) = campaign_details.timeBasedDrops.iter().position(|d| d.id == *drop_id_cache) {
                                         campaign_details.timeBasedDrops.remove(pos);
