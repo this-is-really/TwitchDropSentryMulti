@@ -517,33 +517,49 @@ async fn drop_sync(clients: Vec<Arc<TwitchClient>>, tx: Sender<String>, cache_pa
                     }
                 };
 
-                let drop_progress = retry!(client.get_current_drop_progress_on_channel(&watching.channel_login));
+                let drop_progress = match client.get_current_drop_progress_on_channel(&watching.channel_login).await {
+                    Ok(progress) => progress,
+                    Err(e) => {
+                        error!("Failed to get drop progress for channel {}: {e}", watching.channel_login);
+                        tokio::select! {
+                            _ = rx_watch_clone.changed() => {},
+                            _ = sleep(Duration::from_secs(30)) => {},
+                        };
+                        continue;
+                    }
+                };
 
                 let should_claim = !drop_progress.dropID.is_empty() && drop_progress.currentMinutesWatched >= drop_progress.requiredMinutesWatched && drop_progress.dropID != last_claimed;
 
-                let mut cache = state_clone.drop_cache.lock().await;
-
                 if should_claim {
-                    let _ = claim_drop(&client, &drop_progress.dropID).await;
-                    info!("Drop claimed: {}", drop_progress.dropID);
+                    match claim_drop(&client, &drop_progress.dropID).await {
+                        Ok(_) => {
+                            info!("Drop claimed: {}", drop_progress.dropID);
+                            let _ = tx.send(drop_progress.dropID.clone());
 
-                    tx.send(drop_progress.dropID.clone()).unwrap_or_else(|_| error!("tx closed"));
+                            let cache_string = {
+                                let mut cache = state_clone.drop_cache.lock().await;
+                                cache.entry(client.user_id.clone().unwrap_or_default()).or_default().insert(drop_progress.dropID.clone());
+                                match serde_json::to_string_pretty(&*cache) {
+                                    Ok(s) => Some(s),
+                                    Err(e) => {
+                                        error!("Failed to serialize cache to JSON: {e}");
+                                        None
+                                    }
+                                }
+                            };
+                            
+                            if let Some(json_str) = cache_string {
+                                if let Err(e) = fs::write(&cache_path, json_str).await {
+                                    error!("Failed to write cache to file {}: {e}", cache_path.display());
+                                }
+                            }
 
-                    cache.entry(client.user_id.clone().unwrap_or_default()).or_default().insert(drop_progress.dropID.clone());
-
-                    last_claimed = drop_progress.dropID.clone();
-
-                    let cache_string = match serde_json::to_string_pretty(&*cache) {
-                        Ok(s) => s,
-                        Err(e) => {
-                            error!("Failed to serialize cache to JSON: {e}");
-                            continue;
-                        }
+                            last_claimed = drop_progress.dropID.clone();
+                        },
+                        Err(e) => error!("Failed to claim drop {}: {e}", drop_progress.dropID)
                     };
-                    retry!(fs::write(&cache_path, cache_string.as_bytes()));
                 }
-
-                drop(cache);
 
                 let message = if drop_progress.dropID.is_empty() {
                     "No active drop • waiting..."
