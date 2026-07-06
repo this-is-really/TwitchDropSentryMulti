@@ -524,7 +524,7 @@ async fn drop_sync(clients: Vec<Arc<TwitchClient>>, tx: Sender<String>, cache_pa
                 let mut cache = state_clone.drop_cache.lock().await;
 
                 if should_claim {
-                    retry!(claim_drop(&client, &drop_progress.dropID));
+                    let _ = claim_drop(&client, &drop_progress.dropID).await;
                     info!("Drop claimed: {}", drop_progress.dropID);
 
                     tx.send(drop_progress.dropID.clone()).unwrap_or_else(|_| error!("tx closed"));
@@ -626,7 +626,9 @@ async fn drop_sync(clients: Vec<Arc<TwitchClient>>, tx: Sender<String>, cache_pa
 }
 
 async fn claim_drop (client: &Arc<TwitchClient>, drop_progress_id: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
-    loop {
+    let max_attempts = 15;
+    let mut attempts = 0;
+    while attempts < max_attempts {
         let inv = client.get_inventory().await?;
         if let Some(campaigns_in_progress) = inv.inventory.dropCampaignsInProgress {
             for in_progress in campaigns_in_progress {
@@ -643,6 +645,8 @@ async fn claim_drop (client: &Arc<TwitchClient>, drop_progress_id: &str) -> Resu
                 }
             }
         }
+        attempts += 1;
         sleep(Duration::from_secs(10)).await
     }
+    Ok(())
 }
