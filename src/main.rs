@@ -1,4 +1,4 @@
-use std::{collections::{BTreeMap, HashMap, HashSet, VecDeque}, error::Error, path::{Path, PathBuf}, sync::Arc, time::Duration};
+use std::{collections::{BTreeMap, HashMap, HashSet, VecDeque}, error::Error, path::Path, sync::Arc, time::Duration};
 
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use rand::{RngExt, SeedableRng, rng, rngs::SmallRng, seq::{IndexedRandom, SliceRandom}};
@@ -125,7 +125,7 @@ async fn main () -> Result<(), Box<dyn Error>> {
     let mut entries = fs::read_dir(&home_dir).await?;
     while let Some(entry) = entries.next_entry().await? {
         let path = entry.path();
-        if path.is_file() && path.extension().map_or(false, |s| s == "json" ) && path.file_name().unwrap_or_default() != "cache.json" && path.file_name().unwrap_or_default() != "config.json" {
+        if path.is_file() && path.extension().map_or(false, |s| s == "json" ) && path.file_name().unwrap_or_default() != "cache.json" && path.file_name().unwrap_or_default() != "config.json"  && path.file_name().unwrap_or_default() != "cash.json" {
             let selected_proxy = proxy_pool.next();
             let client = TwitchClient::load_from_file(&path, &selected_proxy.cloned()).await?;
             if let Err(e) = client.get_campaign().await {
@@ -234,7 +234,6 @@ async fn main_logic (client: Arc<TwitchClient> ,grouped: BTreeMap<usize, VecDequ
 
     let notify = Arc::new(Notify::new());
     let drop_campaigns = Arc::new(Mutex::new(current_campaigns.clone()));
-    let drop_cache_dir = home_dir.join("cache.json");
 
     let clients = global_state.accounts.lock().await;
     let clients = if let Some(accounts) = clients.clone() {
@@ -251,7 +250,7 @@ async fn main_logic (client: Arc<TwitchClient> ,grouped: BTreeMap<usize, VecDequ
     };
     watch_sync(clients.clone(), channel_rx, notify.clone()).await;
     info!("Watch synchronization task has been successfully initiated");
-    drop_sync(clients.clone(), drop_id_tx, drop_cache_dir, channel_rx2, notify.clone(), webhook_tx, weebhook_is_active, global_state.clone()).await;
+    drop_sync(clients.clone(), drop_id_tx, home_dir, channel_rx2, notify.clone(), webhook_tx, weebhook_is_active, global_state.clone()).await;
     info!("Drop progress tracker is active");
     filter_streams(client.clone(), drop_campaigns.clone(), global_state.clone()).await;
     info!("Stream filtering has begun");
@@ -466,7 +465,16 @@ async fn watch_sync (clients: Vec<Arc<TwitchClient>>, rx: tokio::sync::watch::Re
     }
 }
 
-async fn drop_sync(clients: Vec<Arc<TwitchClient>>, tx: Sender<String>, cache_path: PathBuf, rx_watch: tokio::sync::watch::Receiver<Option<Channel>>, notify: Arc<Notify>, webhook_tx: mpsc::Sender<WebhookSendFormat>, webhook_is_active: bool, state: Arc<AppState>) {
+async fn drop_sync(clients: Vec<Arc<TwitchClient>>, tx: Sender<String>, home_dir: &Path, rx_watch: tokio::sync::watch::Receiver<Option<Channel>>, notify: Arc<Notify>, webhook_tx: mpsc::Sender<WebhookSendFormat>, webhook_is_active: bool, state: Arc<AppState>) {
+    let cache_path = home_dir.join("cache.json");
+    let old_cache_path = home_dir.join("cash.json");
+
+    if old_cache_path.exists() {
+        if let Err(e) = fs::rename(&old_cache_path, &cache_path).await {
+            error!("Failed to rename cache file: {e}");
+        }
+    }
+
     if !cache_path.exists() {
         retry!(fs::write(&cache_path, "{}"));
     } else {
