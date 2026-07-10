@@ -1,9 +1,12 @@
+use std::collections::HashMap;
+
 use rand::{rng, seq::IndexedRandom};
 use reqwest::{Client, Proxy};
 use serde_json::json;
 use tracing::error;
 use tokio::sync::mpsc::Receiver;
 
+#[derive(Debug, Default, Clone)]
 pub struct WebhookSendFormat {
     pub twitch_name: String,
     pub game_name: String,
@@ -35,6 +38,7 @@ pub async fn webhook_message_worker(wh_url: String, mut info_rx: Receiver<Webhoo
     };
 
     tokio::spawn(async move {
+        let mut account_messages: HashMap<String, String> = HashMap::new();
         while let Some(info) = info_rx.recv().await {
             let progress_bar = (0..10).map(|i| if i < (info.progress_percent / 10) { "▰" } else { "▱" }).collect::<String>();
 
@@ -79,9 +83,30 @@ pub async fn webhook_message_worker(wh_url: String, mut info_rx: Receiver<Webhoo
                 }]
             });
 
-            if let Err(e) = client.post(&wh_url).json(&payload).send().await {
-                error!("{e}")
-            };
+            if let Some(msg_id) = account_messages.get(&info.twitch_name) {
+                let edit_url = format!("{}/messages/{}", wh_url, msg_id);
+                if let Err(e) = client.patch(edit_url).json(&payload).send().await {
+                    error!("Failed to edit message: {}", e);
+                }
+            } else {
+                let post_url = format!("{}?wait=true", wh_url);
+                match client.post(post_url).json(&payload).send().await {
+                    Ok(response) => {
+                        if response.status().is_success() {
+                            if let Ok(json_resp) = response.json::<serde_json::Value>().await {
+                                if let Some(id) = json_resp.get("id").and_then(|v| v.as_str()) {
+                                    account_messages.insert(info.twitch_name.clone(), id.to_string());
+                                } else {
+                                    error!("Failed to get message ID from response");
+                                }
+                            } else {
+                                error!("Failed to parse JSON response");
+                            }
+                        }
+                    },
+                    Err(e) => error!("Failed to send webhook message: {}", e)
+                }
+            }
         }
     });
 }
