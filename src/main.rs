@@ -540,7 +540,7 @@ async fn drop_sync(clients: Vec<Arc<TwitchClient>>, tx: Sender<String>, home_dir
                 let should_claim = !drop_progress.dropID.is_empty() && drop_progress.currentMinutesWatched >= drop_progress.requiredMinutesWatched && drop_progress.dropID != last_claimed;
 
                 if should_claim {
-                    match claim_drop(&client, &drop_progress.dropID).await {
+                    match claim_drop(&client, drop_progress.game.clone().map(|s| s.id), &drop_progress.dropID).await {
                         Ok(_) => {
                             info!("Drop claimed: {}", drop_progress.dropID);
                             let _ = tx.send(drop_progress.dropID.clone());
@@ -649,20 +649,37 @@ async fn drop_sync(clients: Vec<Arc<TwitchClient>>, tx: Sender<String>, home_dir
     }
 }
 
-async fn claim_drop (client: &Arc<TwitchClient>, drop_progress_id: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
+async fn claim_drop (client: &Arc<TwitchClient>, game_id_option: Option<String>, drop_id: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
     let max_attempts = 15;
     let mut attempts = 0;
     while attempts < max_attempts {
         let inv = client.get_inventory().await?;
         if let Some(campaigns_in_progress) = inv.inventory.dropCampaignsInProgress {
             for in_progress in campaigns_in_progress {
-                for time_based in in_progress.timeBasedDrops {
-                    if time_based.id == drop_progress_id {
-                        if let Some(id) = time_based.self_drop.dropInstanceID {
-                            match client.claim_drop(&id).await {
-                                Ok(_) => return Ok(()),
-                                Err(ClaimDropError::DropAlreadyClaimed) => return Ok(()),
-                                Err(e) => error!("{e}")
+                match &game_id_option {
+                    Some(game_id) => {
+                        if &in_progress.game.id == game_id {
+                            for time_based in in_progress.timeBasedDrops {
+                                if let Some(id) = time_based.self_drop.dropInstanceID {
+                                    match client.claim_drop(&id).await {
+                                        Ok(_) => return Ok(()),
+                                        Err(ClaimDropError::DropAlreadyClaimed) => return Ok(()),
+                                        Err(e) => error!("{e}")
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    None => {
+                        for time_based in in_progress.timeBasedDrops {
+                            if time_based.id == drop_id {
+                                if let Some(id) = time_based.self_drop.dropInstanceID {
+                                    match client.claim_drop(&id).await {
+                                        Ok(_) => return Ok(()),
+                                        Err(ClaimDropError::DropAlreadyClaimed) => return Ok(()),
+                                        Err(e) => error!("{e}")
+                                    }
+                                }
                             }
                         }
                     }

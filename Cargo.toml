@@ -5,13 +5,13 @@ edition = "2024"
 
 [dependencies]
 reqwest = { version = "0.13.4", features = ["json"] }
-tokio = { version = "1.52.3", features = ["full"] }
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.150"
-twitch-gql-rs = "0.3.4"
+tokio = { version = "1.53.1", features = ["full"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+twitch-gql-rs = "0.3.5"
 dialoguer = "0.12.0"
 tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-native-roots"] }
-futures-util = "0.3.32"
+futures-util = "0.3.33"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["chrono"] }
 indicatif = "0.18.6"
