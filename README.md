@@ -2,16 +2,16 @@
 [![Discord](https://img.shields.io/discord/1437005378750775359?style=for-the-badge&logo=discord&label=Join%20Discord)](https://discord.gg/7H7n4RPtJG)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Rust](https://img.shields.io/badge/Rust-000000?style=for-the-badge&logo=rust&logoColor=white)](https://www.rust-lang.org)
-[![Version](https://img.shields.io/badge/Version-1.0.7-success?style=for-the-badge)](https://github.com/this-is-really/TwitchDropSentryMulti/releases)
+[![Version](https://img.shields.io/badge/Version-1.0.8-success?style=for-the-badge)](https://github.com/this-is-really/TwitchDropSentryMulti/releases)
 
 **Next-level multi-account Twitch Drops farmer.**
 Watch streams and claim time-based drops **for all your accounts at once** - completely hands-free, blazing fast, and extremely lightweight.
 
 ---
 > [!IMPORTANT]
-> **DropSentry 1.0.7 - emergency Twitch API update**
+> **DropSentry 1.0.8 - improved drop claiming and stability**
 >
-> This release is an urgent compatibility fix for recent Twitch API changes
+> This release focuses on more reliable drop claiming, better error handling, and updated dependencies for smoother farming.
 >
 > Use `--debug` for full runtime diagnostics and bug reports
 
@@ -170,4 +170,4 @@ It’s the best motivation to keep pushing updates.
 ---
 **Made with ❤️ for the Twitch community**  
 **License:** [MIT](LICENSE)  
-**Version:** 1.0.7
+**Version:** 1.0.8
