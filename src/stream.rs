@@ -195,7 +195,7 @@ async fn spawn_ws (auth_token: String, state: Arc<AppState>) {
                     });
                     let payload = serde_json::to_string(&payload).expect("json! macro production is guaranteed to be serializable");
                     let payload = tokio_tungstenite::tungstenite::Message::Text(payload.into());
-                    write.send(payload).await.unwrap_or_else(|e| error!("Failed to send payload to WebSocket: {e}"));
+                    write.send(payload).await.unwrap_or_else(|e| warn!("Failed to send payload to WebSocket: {e}"));
                     send_channels.extend(new_channels);
                 }
 
@@ -210,7 +210,7 @@ async fn spawn_ws (auth_token: String, state: Arc<AppState>) {
                     });
                     let payload = serde_json::to_string(&payload).expect("json! macro production is guaranteed to be serializable");
                     let payload = tokio_tungstenite::tungstenite::Message::Text(payload.into());
-                    write.send(payload).await.unwrap_or_else(|e| error!("Failed to send payload to WebSocket: {e}"));
+                    write.send(payload).await.unwrap_or_else(|e| warn!("Failed to send payload to WebSocket: {e}"));
                     for delete in delete_channels {
                         send_channels.remove(&delete);
                     }
@@ -369,10 +369,10 @@ pub async fn update_stream (tx_now_watch: tokio::sync::watch::Sender<Option<Chan
         });
 
         loop {
-            let channel_pool = state.channel_pool.lock().await.clone();
-            let allow_channels = state.allow_channels.lock().await.clone();
-            let default_channels = state.default_channels.lock().await.clone();
-            let campaign_priority = state.campaign_priority.lock().await.clone();
+            let channel_pool = state.channel_pool.lock().await;
+            let allow_channels = state.allow_channels.lock().await;
+            let default_channels = state.default_channels.lock().await;
+            let campaign_priority = state.campaign_priority.lock().await;
 
             if channel_pool.is_empty() || (allow_channels.is_empty() && default_channels.is_empty()) {
                 sleep(Duration::from_secs(UPDATE_TIME)).await;
@@ -402,14 +402,14 @@ pub async fn update_stream (tx_now_watch: tokio::sync::watch::Sender<Option<Chan
             }
             
             let mut new_heap: BinaryHeap<Priority> = BinaryHeap::new();
-            for channel in &channel_pool {
+            for channel in channel_pool.iter() {
                 if watched.contains(channel) {
                     continue;
                 }
 
                 let mut prio = 0;
 
-                for (camp_id, allow_set) in &allow_channels {
+                for (camp_id, allow_set) in allow_channels.iter() {
                     if allow_set.iter().any(|s| s.id == channel.channel_id) {
                         let base = *campaign_priority.get(camp_id).unwrap_or(&0);
                         let current_prio = ALLOW_TIER + base;
@@ -417,7 +417,7 @@ pub async fn update_stream (tx_now_watch: tokio::sync::watch::Sender<Option<Chan
                     }
                 }
             
-                for (camp_id, def_set) in &default_channels {
+                for (camp_id, def_set) in default_channels.iter() {
                     if def_set.iter().any(|s| s.broadcaster.id == channel.channel_id) {
                         let base = *campaign_priority.get(camp_id).unwrap_or(&0);
                         let current_prio = DEFAULT_TIER + base;
@@ -450,7 +450,7 @@ pub async fn update_stream (tx_now_watch: tokio::sync::watch::Sender<Option<Chan
             }
             
             empty_cycles = 0;
-            old_channel_pool = channel_pool;
+            old_channel_pool = channel_pool.clone();
             let _ = stream_candidates_tx.send(new_heap);
 
             sleep(Duration::from_secs(UPDATE_TIME)).await;

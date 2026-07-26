@@ -497,15 +497,14 @@ async fn drop_sync(clients: Vec<Arc<TwitchClient>>, tx: Sender<String>, home_dir
         let mut rx_watch_clone = rx_watch.clone();
 
         tokio::spawn(async move {
-            let mut last_claimed = String::new();
-            let mut last_message = String::new();
-
             //bar
             let bar = bars.add(ProgressBar::new(1));
             bar.set_style(ProgressStyle::with_template("[{bar:40.cyan/blue}] {percent:.1}% ({pos}/{len} min) {msg}").expect("Failed to create progress bar style"));
             bar.set_message("Initialization...");
             bar.enable_steady_tick(Duration::from_millis(500));
 
+            let mut last_claimed = String::new();
+            let mut last_message = String::new();
             let mut last_drop_id = String::new();
 
             loop {
@@ -536,19 +535,42 @@ async fn drop_sync(clients: Vec<Arc<TwitchClient>>, tx: Sender<String>, home_dir
                         continue;
                     }
                 };
+                debug!("{:?}", drop_progress);
 
-                let should_claim = !drop_progress.dropID.is_empty() && drop_progress.currentMinutesWatched >= drop_progress.requiredMinutesWatched && drop_progress.dropID != last_claimed;
+                let mut current_minutes = drop_progress.currentMinutesWatched;
+                let mut required_minutes = drop_progress.requiredMinutesWatched;
+                let has_active_drop = !drop_progress.dropID.is_empty();
 
-                if should_claim {
-                    match claim_drop(&client, drop_progress.game.clone().map(|s| s.id), &drop_progress.dropID).await {
-                        Ok(_) => {
+                let tracked_drop_id = if has_active_drop {
+                    drop_progress.dropID.clone()
+                } else {
+                    last_drop_id.clone()
+                };
+
+                let stale_drop_id = if !last_drop_id.is_empty() && last_drop_id != last_claimed && last_drop_id != drop_progress.dropID {
+                    Some(last_drop_id.clone())
+                } else {
+                    None
+                };
+
+                let current_needs_check = stale_drop_id.is_none() && has_active_drop && drop_progress.dropID != last_claimed && required_minutes > 0 && current_minutes >= required_minutes;
+
+                let id_to_verify = stale_drop_id.clone().or_else(|| {
+                    if current_needs_check { Some(drop_progress.dropID.clone()) } else { None }
+                });
+
+                let mut leave_channel = !has_active_drop && (last_drop_id.is_empty() || last_drop_id == last_claimed); 
+
+                if let Some(drop_id) = id_to_verify {
+                    match claim_drop(&client, &drop_id).await {
+                        ClaimOutcome::Claimed => {
                             info!("Drop claimed: {}", drop_progress.dropID);
-                            let _ = tx.send(drop_progress.dropID.clone());
+                            let _ = tx.send(tracked_drop_id.clone());
 
                             let cache_string = {
                                 let mut cache = state_clone.drop_cache.lock().await;
                                 cache.entry(client.user_id.clone().unwrap_or_default()).or_default().insert(drop_progress.dropID.clone());
-                                match serde_json::to_string_pretty(&*cache) {
+                                match serde_json::to_string(&*cache) {
                                     Ok(s) => Some(s),
                                     Err(e) => {
                                         error!("Failed to serialize cache to JSON: {e}");
@@ -563,15 +585,25 @@ async fn drop_sync(clients: Vec<Arc<TwitchClient>>, tx: Sender<String>, home_dir
                                 }
                             }
 
-                            last_claimed = drop_progress.dropID.clone();
+                            last_claimed = tracked_drop_id.clone();
+
+                            if !has_active_drop {
+                                leave_channel = true
+                            }
                         },
-                        Err(e) => error!("Failed to claim drop {}: {e}", drop_progress.dropID)
-                    };
+                        ClaimOutcome::StillInProgress { current, required } => {
+                            current_minutes = current;
+                            required_minutes = required;
+                        },
+                        ClaimOutcome::NotFound => {
+                            leave_channel = true
+                        }
+                    }
                 }
 
-                let message = if drop_progress.dropID.is_empty() {
+                let message = if tracked_drop_id.is_empty() || leave_channel {
                     "No active drop • waiting..."
-                } else if drop_progress.currentMinutesWatched >= drop_progress.requiredMinutesWatched {
+                } else if required_minutes > 0 && current_minutes >= required_minutes {
                     "✅ Ready to claim!"
                 } else {
                     "Watching"
@@ -579,11 +611,11 @@ async fn drop_sync(clients: Vec<Arc<TwitchClient>>, tx: Sender<String>, home_dir
 
                 if webhook_is_active {
                     if last_message != message {
-                        let progress_percent = if drop_progress.requiredMinutesWatched > 0 {
-                            ((drop_progress.currentMinutesWatched as f64 / drop_progress.requiredMinutesWatched as f64) * 100.0) as u8
+                        let progress_percent = if required_minutes > 0 {
+                            ((current_minutes as f64 / required_minutes as f64) * 100.0) as u8
                         } else { 0 };
 
-                        let progress_text = format!("{}m / {}m", drop_progress.currentMinutesWatched, drop_progress.requiredMinutesWatched);
+                        let progress_text = format!("{}m / {}m", current_minutes, required_minutes);
 
                         let (game_name, game_avatar_url) = if drop_progress.dropID.is_empty() {
                             ("None".to_string(), "None".to_string())
@@ -619,25 +651,25 @@ async fn drop_sync(clients: Vec<Arc<TwitchClient>>, tx: Sender<String>, home_dir
 
                 let message = format!("{} | {}", client.login.clone().unwrap_or_default(), message);
             
-                if drop_progress.dropID != last_drop_id {
-                    last_drop_id = drop_progress.dropID.clone();
+                if leave_channel || tracked_drop_id.is_empty() {
+                    last_drop_id = String::new()
+                } else if tracked_drop_id != last_drop_id {
+                    last_drop_id = tracked_drop_id.clone();
                     bar.set_position(0);
-                    bar.set_length(drop_progress.requiredMinutesWatched.max(1));
+                    bar.set_length(required_minutes.max(1));
                     bar.set_message(message);
                 } else {
                     bar.set_message(message);
                 }
             
-                bar.set_length(drop_progress.requiredMinutesWatched.max(1));
-                bar.set_position(drop_progress.currentMinutesWatched);
+                bar.set_length(required_minutes.max(1));
+                bar.set_position(current_minutes);
             
-                if drop_progress.dropID.is_empty() || (drop_progress.currentMinutesWatched >= drop_progress.requiredMinutesWatched && drop_progress.dropID != last_claimed) {
-                    debug!("Not claiming yet: dropID: {}, currentMinutesWatched: {}, requiredMinutesWatched: {}, lastClaimed: {}", drop_progress.dropID, drop_progress.currentMinutesWatched, drop_progress.requiredMinutesWatched, last_claimed);
+                if leave_channel {
+                    debug!("Not claiming yet: dropID: {}, currentMinutesWatched: {}, requiredMinutesWatched: {}, lastClaimed: {}", tracked_drop_id, current_minutes, required_minutes, last_claimed);
                     notify.notify_one();
-                    if drop_progress.dropID.is_empty() {
-                        let mut channel_pool_lock = state_clone.channel_pool.lock().await;
-                        channel_pool_lock.retain(|c| c.channel_id != watching.channel_id);
-                    }
+                    let mut channel_pool_lock = state_clone.channel_pool.lock().await;
+                    channel_pool_lock.retain(|c| c.channel_id != watching.channel_id);
                 }
 
                 tokio::select! {
@@ -649,45 +681,52 @@ async fn drop_sync(clients: Vec<Arc<TwitchClient>>, tx: Sender<String>, home_dir
     }
 }
 
-async fn claim_drop (client: &Arc<TwitchClient>, game_id_option: Option<String>, drop_id: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let max_attempts = 15;
-    let mut attempts = 0;
-    while attempts < max_attempts {
-        let inv = client.get_inventory().await?;
-        if let Some(campaigns_in_progress) = inv.inventory.dropCampaignsInProgress {
-            for in_progress in campaigns_in_progress {
-                match &game_id_option {
-                    Some(game_id) => {
-                        if &in_progress.game.id == game_id {
-                            for time_based in in_progress.timeBasedDrops {
-                                if let Some(id) = time_based.self_drop.dropInstanceID {
-                                    match client.claim_drop(&id).await {
-                                        Ok(_) => return Ok(()),
-                                        Err(ClaimDropError::DropAlreadyClaimed) => return Ok(()),
-                                        Err(e) => error!("{e}")
-                                    }
-                                }
-                            }
-                        }
-                    },
-                    None => {
-                        for time_based in in_progress.timeBasedDrops {
-                            if time_based.id == drop_id {
-                                if let Some(id) = time_based.self_drop.dropInstanceID {
-                                    match client.claim_drop(&id).await {
-                                        Ok(_) => return Ok(()),
-                                        Err(ClaimDropError::DropAlreadyClaimed) => return Ok(()),
-                                        Err(e) => error!("{e}")
-                                    }
-                                }
+enum ClaimOutcome {
+    Claimed,
+    StillInProgress { current: u64, required: u64 },
+    NotFound
+}
+
+async fn claim_drop (client: &Arc<TwitchClient>, drop_id: &str) -> ClaimOutcome {
+    let inv = match client.get_inventory().await {
+        Ok(inv) => inv,
+        Err(e) => {
+            error!("Failed to fetch inventory while resolving drop {drop_id}: {e}");
+            return ClaimOutcome::StillInProgress { current: 0, required: 0 };
+        }
+    };
+
+    if let Some(campaign_in_progress) = inv.inventory.dropCampaignsInProgress {
+        for in_progress in campaign_in_progress {
+            for time_based in in_progress.timeBasedDrops {
+                if time_based.id != drop_id {
+                    continue;
+                }
+
+                if time_based.self_drop.isClaimed {
+                    return ClaimOutcome::Claimed;
+                }
+
+                let Some(instance_id) = time_based.self_drop.dropInstanceID else { return ClaimOutcome::StillInProgress { current: time_based.self_drop.currentMinutesWatched, required: time_based.requiredMinutesWatched }; };
+
+                let max_attempts = 5;
+                for attempt in 1..=max_attempts {
+                    match client.claim_drop(&instance_id).await {
+                        Ok(_) => return ClaimOutcome::Claimed,
+                        Err(ClaimDropError::DropAlreadyClaimed) => return ClaimOutcome::Claimed,
+                        Err(e) => {
+                            error!("Claim attempt {attempt}/{max_attempts} for drop {drop_id} failed: {e}");
+                            if attempt < max_attempts {
+                                sleep(Duration::from_secs(5)).await;
                             }
                         }
                     }
                 }
+
+                return ClaimOutcome::StillInProgress { current: time_based.self_drop.currentMinutesWatched, required: time_based.requiredMinutesWatched };
             }
         }
-        attempts += 1;
-        sleep(Duration::from_secs(10)).await
     }
-    Ok(())
+
+    ClaimOutcome::NotFound
 }
