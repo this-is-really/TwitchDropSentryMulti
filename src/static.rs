@@ -1,4 +1,4 @@
-use std::{collections::{HashMap, HashSet}, sync::Arc, time::Duration};
+use std::{collections::{HashMap, HashSet}, path::PathBuf, sync::Arc, time::Duration};
 
 use tokio::{sync::Mutex, time::sleep};
 use twitch_gql_rs::{TwitchClient, structs::{Channels, GameDirectory}};
@@ -18,7 +18,8 @@ pub struct AppState {
     pub channel_pool: Mutex<HashSet<Channel>>,
     pub default_channels: Mutex<HashMap<String, HashSet<GameDirectory>>>,
     pub allow_channels: Mutex<HashMap<String, HashSet<Channels>>>,
-    pub campaign_priority: Mutex<HashMap<String, u32>>
+    pub campaign_priority: Mutex<HashMap<String, u32>>,
+    pub cache_path: std::sync::OnceLock<PathBuf>,
 }
 
 #[macro_export]
