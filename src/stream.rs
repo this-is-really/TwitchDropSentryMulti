@@ -9,7 +9,7 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, error, warn};
 use twitch_gql_rs::{TwitchClient, structs::{Channels, DropCampaigns, GameDirectory}};
 
-use crate::{retry, r#static::{AppState, Channel, retry_backup}};
+use crate::{r#static::{AppState, Channel, retry_backup}};
 
 const UPDATE_TIME: u64 = 45;
 const MAX_TOPICS: usize = 120;
@@ -40,7 +40,13 @@ pub async fn filter_streams (client: Arc<TwitchClient>, campaigns_arc: Arc<Mutex
         let base_prio = ((campaigns.len() - game_idx) * 10) as u32;
         for campaign in campaign_queue {
             priority_map.insert(campaign.id.clone(), base_prio);
-            let campaign_details = retry!(client.get_campaign_details(&campaign.id));
+            let campaign_details = match client.get_campaign_details(&campaign.id).await {
+                Ok(details) => details,
+                Err(e) => {
+                    error!("Failed to fetch campaign details for {}: {e}", campaign.id);
+                    continue;
+                }
+            };
             if let Some(allow) = campaign_details.allow.channels {
                 let mut allow_channels = state.allow_channels.lock().await;
                 let allow: HashSet<Channels> = allow.into_iter().collect();
@@ -53,7 +59,13 @@ pub async fn filter_streams (client: Arc<TwitchClient>, campaigns_arc: Arc<Mutex
                     });
                 }
             } else {
-                let game_directory = retry!(client.get_game_directory(&campaign_details.game.slug, 30, true));
+                let game_directory = match client.get_game_directory(&campaign_details.game.slug, 30, true).await {
+                    Ok(directory) => directory,
+                    Err(e) => {
+                        error!("Failed to fetch game directory for {}: {e}", campaign_details.game.slug);
+                        continue;
+                    }
+                };
                 let mut all_default = state.default_channels.lock().await;
                 let game_directory: HashSet<GameDirectory> = game_directory.into_iter().collect();
                 all_default.insert(campaign.id.to_string(), game_directory.clone());
@@ -112,7 +124,13 @@ pub async fn filter_streams (client: Arc<TwitchClient>, campaigns_arc: Arc<Mutex
                                 };
 
                                 if stream_info.stream.is_some() {
-                                    let available_drops = retry!(client.get_available_drops_for_channel(&channel.id));
+                                    let available_drops = match client.get_available_drops_for_channel(&channel.id).await {
+                                        Ok(drops) => drops,
+                                        Err(e) => {
+                                            error!("Failed to fetch available drops for {}: {e}", channel.name);
+                                            continue;
+                                        }
+                                    };
                                     if available_drops.viewerDropCampaigns.is_some() {
                                         to_add.insert(Channel { channel_id: channel.id.clone(), channel_login: channel.name.clone() });
                                     }
@@ -120,8 +138,20 @@ pub async fn filter_streams (client: Arc<TwitchClient>, campaigns_arc: Arc<Mutex
                             }
                         } else {
                             let mut default_channels = state.default_channels.lock().await;
-                            let slug = retry!(client.get_slug(&campaign.game.displayName));
-                            let game_directory = retry!(client.get_game_directory(&slug, 30, true));
+                            let slug = match client.get_slug(&campaign.game.displayName).await {
+                                Ok(slug) => slug,
+                                Err(e) => {
+                                    error!("Failed to fetch game slug for {}: {e}", campaign.game.displayName);
+                                    continue;
+                                }
+                            };
+                            let game_directory = match client.get_game_directory(&slug, 30, true).await {
+                                Ok(directory) => directory,
+                                Err(e) => {
+                                    error!("Failed to fetch game directory for {}: {e}", slug);
+                                    continue;
+                                }
+                            };
                             let game_directory: HashSet<GameDirectory> = game_directory.into_iter().collect();
                             default_channels.insert(campaign.id.clone(), game_directory.clone());
 
@@ -137,7 +167,13 @@ pub async fn filter_streams (client: Arc<TwitchClient>, campaigns_arc: Arc<Mutex
                                 };
 
                                 if stream_info.stream.is_some() {
-                                    let available_drops = retry!(client.get_available_drops_for_channel(&channel.broadcaster.id));
+                                    let available_drops = match client.get_available_drops_for_channel(&channel.broadcaster.id).await {
+                                        Ok(drops) => drops,
+                                        Err(e) => {
+                                            error!("Failed to fetch available drops for {}: {e}", channel.broadcaster.login);
+                                            continue;
+                                        }
+                                    };
                                     if available_drops.viewerDropCampaigns.is_some() {
                                         to_add.insert(Channel { channel_id: channel.broadcaster.id.clone(), channel_login: channel.broadcaster.login.clone() });
                                     }
@@ -175,7 +211,14 @@ pub async fn filter_streams (client: Arc<TwitchClient>, campaigns_arc: Arc<Mutex
 async fn spawn_ws (auth_token: String, state: Arc<AppState>) {
     tokio::spawn(async move {
         loop {
-            let (ws_stream, _) = retry!(connect_async(WS_URL));
+            let (ws_stream, _) = match connect_async(WS_URL).await {
+                Ok(stream) => stream,
+                Err(e) => {
+                    error!("Failed to connect to WebSocket: {e}. Retrying in 30 seconds...");
+                    sleep(Duration::from_secs(30)).await;
+                    continue;
+                }
+            };
             let (mut write, mut read) = ws_stream.split();
             let mut send_channels: HashSet<Channel> = HashSet::new();
             loop {
@@ -236,7 +279,7 @@ async fn spawn_ws (auth_token: String, state: Arc<AppState>) {
                                     continue;
                                 },
                                 "PONG" => {continue;}
-                                "RECCONECT" => {
+                                "RECONNECT" => {
                                     warn!("Received RECONNECT from WebSocket, reconnecting...");
                                     break;
                                 },
@@ -313,14 +356,14 @@ async fn send_now_watched (mut stream_candidates_rx: Receiver<BinaryHeap<Priorit
                     if let Some(max) = watch.peek() {
                         debug!("Send: {}", max.name.channel_login);
                         if let Err(e) = tx_now_watch.send(Some(Channel { channel_id: max.name.channel_id.to_string(), channel_login: max.name.channel_login.to_string() })) {
-                            error!("{e}")
+                            error!("Failed to send watch update for {}: {e}", max.name.channel_login);
                         };
                         notify.notified().await;
                         debug!("Notified to claim drops for: {}", max.name.channel_login);
 
                         loop {
                             if let Err(e) = tx_for_delete.send(max.name.clone()) {
-                                error!("{e}");
+                                error!("Failed to send delete notification for {}: {e}", max.name.channel_login);
                                 sleep(Duration::from_secs(5)).await;
                                 continue;
                             } else {

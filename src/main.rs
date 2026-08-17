@@ -265,7 +265,13 @@ async fn main_logic (client: Arc<TwitchClient> ,grouped: BTreeMap<usize, VecDequ
 
         for game_campaign in current_campaigns {
             for campaign in game_campaign {
-                let mut campaign_details = retry!(client.get_campaign_details(&campaign.id));
+                let mut campaign_details = match client.get_campaign_details(&campaign.id).await {
+                    Ok(details) => details,
+                    Err(e) => {
+                        error!("Failed to fetch campaign details for {} ({}): {e}", campaign.id, campaign.game.displayName);
+                        continue;
+                    }
+                };
                 for (_, claimed_drops) in &cache {
                     for drop_id_cache in claimed_drops {
                         if let Some(pos) = campaign_details.timeBasedDrops.iter().position(|d| d.id == *drop_id_cache) {
@@ -317,7 +323,7 @@ async fn main_logic (client: Arc<TwitchClient> ,grouped: BTreeMap<usize, VecDequ
                 }).collect();
 
                 if new_query_games.is_empty() {
-                    info!("No active campaigns found for the configured games. Will check again in 10 minutes...");
+                    info!("No active campaigns found for the configured games. Will check again in 15-30 minutes...");
                     continue;
                 }
 
@@ -425,7 +431,13 @@ async fn watch_sync (clients: Vec<Arc<TwitchClient>>, rx: tokio::sync::watch::Re
                 let (stream_id, game_name, game_id) = match &now_watching_stream {
                     Some(s) => s.clone(),
                     None => {
-                        let stream_info = retry!(client.get_stream_info(&watching.channel_login));
+                        let stream_info = match client.get_stream_info(&watching.channel_login).await {
+                            Ok(info) => info,
+                            Err(e) => {
+                                error!("Failed to fetch stream info for {}: {e}", watching.channel_login);
+                                continue;
+                            }
+                        };
 
                         if let Some(stream) = stream_info.stream {
                             let data = (stream.id, stream_info.broadcastSettings.game.name, stream_info.broadcastSettings.game.id);
@@ -451,7 +463,7 @@ async fn watch_sync (clients: Vec<Arc<TwitchClient>>, rx: tokio::sync::watch::Re
                         };
                     },
                     Err(e) => {
-                        error!("{e}");
+                        error!("Failed to send watch heartbeat for {}: {e}", watching.channel_login);
                         tokio::select! {
                             _ = watch_rx.changed() => {},
                             _ = sleep(Duration::from_secs(STREAM_SLEEP)) => {},
@@ -474,13 +486,24 @@ async fn drop_sync(clients: Vec<Arc<TwitchClient>>, home_dir: &Path, rx_watch: t
     }
 
     if !cache_path.exists() {
-        retry!(fs::write(&cache_path, "{}"));
+        if let Err(e) = fs::write(&cache_path, "{}").await {
+            error!("Failed to create cache file at {}: {e}", cache_path.display());
+        }
     } else {
-        let mut cache = state.drop_cache.lock().await;
-        let cache_str = retry!(fs::read_to_string(&cache_path));
-        let cache_vec: HashMap<String, HashSet<String>> = serde_json::from_str(&cache_str).expect("Failed to deserialize cache from JSON");
-        *cache = cache_vec;
-        drop(cache);
+        match fs::read_to_string(&cache_path).await {
+            Ok(cache_str) => match serde_json::from_str::<HashMap<String, HashSet<String>>>(&cache_str) {
+                Ok(cache_vec) => {
+                    let mut cache = state.drop_cache.lock().await;
+                    *cache = cache_vec;
+                }
+                Err(e) => {
+                    error!("Cache file at {} is corrupted, starting with an empty cache: {e}", cache_path.display());
+                }
+            },
+            Err(e) => {
+                error!("Failed to read cache file at {}, starting with an empty cache: {e}", cache_path.display());
+            }
+        }
     }
     let _ = state.cache_path.set(cache_path);
 
@@ -558,7 +581,13 @@ async fn drop_sync(clients: Vec<Arc<TwitchClient>>, home_dir: &Path, rx_watch: t
                     let (game_name, game_avatar_url) = if drop_progress.dropID.is_empty() {
                         ("None".to_string(), "None".to_string())
                     } else {
-                        let inv = retry!(client.get_inventory());
+                        let inv = match client.get_inventory().await {
+                            Ok(i) => i,
+                            Err(e) => {
+                                error!("Failed to fetch inventory for {}: {e}", client.login.clone().unwrap_or_default());
+                                continue;
+                            }
+                        };
                         if let Some(found) = inv.inventory.dropCampaignsInProgress.as_ref().and_then(|campaigns| {
                             campaigns.iter().find(|campaign| {
                                 campaign.timeBasedDrops.iter().any(|time_based| {
@@ -629,7 +658,7 @@ async fn sweep_claim_all(clients: Vec<Arc<TwitchClient>>, drop_id_tx: UnboundedS
                 let inv = match client.get_inventory().await {
                     Ok(inv) => inv,
                     Err(e) => {
-                        error!("Sweep: failed to fetch inventory for {}: {e}", client.login.clone().unwrap_or_default());
+                        error!("Sweep: Failed to fetch inventory for {}: {e}", client.login.clone().unwrap_or_default());
                         continue;
                     }
                 };

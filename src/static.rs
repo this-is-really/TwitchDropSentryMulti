@@ -45,3 +45,29 @@ pub async fn retry_backup<F, Fut, T, E> (mut f: F) -> Result<T, E> where F: FnMu
         }
     }
 }
+
+pub fn spawn_supervised<F, Fut>(name: impl Into<String>, restart_delay: Duration, mut make_future: F) 
+where 
+    F: FnMut() -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + Send + 'static
+{
+    let name = name.into();
+    tokio::spawn(async move {
+        loop {
+            let handle = tokio::spawn(make_future());
+            match handle.await {
+                Ok(()) => {
+                    tracing::warn!("Task '{name}' exited unexpectedly (it should run forever). Restarting in {}s...", restart_delay.as_secs());
+                }
+                Err(join_err) if join_err.is_panic() => {
+                    tracing::error!("Task '{name}' panicked: {join_err}. Restarting in {}s...", restart_delay.as_secs());
+                }
+                Err(join_err) => {
+                    tracing::warn!("Task '{name}' was cancelled: {join_err}");
+                    return;
+                }
+            }
+            sleep(restart_delay).await;
+        }
+    });
+} 
