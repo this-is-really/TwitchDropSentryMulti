@@ -289,9 +289,10 @@ async fn main_logic (client: Arc<TwitchClient> ,grouped: BTreeMap<usize, VecDequ
     if !games.is_empty() {
         let games_clone = games.clone();
         let pending_drops_clone = pending_drops.clone();
+        let global_state_clone = global_state.clone();
+
         let mut rng = rng();
         let mut rng = SmallRng::from_rng(&mut rng);
-        let global_state_clone = global_state.clone();
         tokio::spawn(async move {
             loop {
                 let jitter = rng.random_range(15..=30);
@@ -666,7 +667,7 @@ async fn sweep_claim_all(clients: Vec<Arc<TwitchClient>>, drop_id_tx: UnboundedS
                     for campaign in campaigns {
                         for drop in campaign.timeBasedDrops {
                             let ready = drop.requiredMinutesWatched > 0 && drop.self_drop.currentMinutesWatched >= drop.requiredMinutesWatched;
-                            if !ready { continue; }
+                            if !ready || drop.self_drop.isClaimed { continue; }
                             if let Some(instance_id) = drop.self_drop.dropInstanceID {
                                 claim_now_or_queue(client.clone(), drop.id.clone(), instance_id, &drop_id_tx, &state).await;
                             } else { 
