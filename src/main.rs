@@ -7,6 +7,7 @@ use tracing::{debug, info, error, warn, level_filters::LevelFilter};
 use tracing_appender::rolling;
 use tracing_subscriber::fmt::{time::ChronoLocal, writer::BoxMakeWriter};
 use twitch_gql_rs::{TwitchClient, client_type::ClientType, error::ClaimDropError, structs::{DropCampaigns}};
+use clap::Parser;
 
 mod r#static;
 mod stream;
@@ -89,10 +90,19 @@ fn group_campaigns (campaign: Vec<DropCampaigns>, current_id_to_index: &mut Hash
     }
 }
 
+#[derive(Debug, Parser)]
+#[command(author, version, about = "Twitch Drop Sentry Multi")]
+struct Args {
+    #[arg(short = 's', long = "sessions", default_value_t = 0)]
+    sessions: usize,
+    #[arg(long = "debug", default_value_t = false)]
+    debug: bool
+}
+
 #[tokio::main]
 async fn main () -> Result<(), Box<dyn Error>> {
-    let debug = std::env::args().any(|a| a == "--debug");
-    let level = if debug { LevelFilter::DEBUG } else { LevelFilter::INFO };
+    let args = Args::parse();
+    let level = if args.debug { LevelFilter::DEBUG } else { LevelFilter::INFO };
 
     let file_appender = rolling::never(".", "app.log");
     tracing_subscriber::fmt().with_writer(BoxMakeWriter::new(file_appender)).with_max_level(level).with_ansi(false).with_timer(ChronoLocal::new("%Y-%m-%d %H:%M:%S%.3f".into())).init();
@@ -146,6 +156,27 @@ async fn main () -> Result<(), Box<dyn Error>> {
     if !loaded_clients.is_empty() {
         let mut accounts_lock = global_state.accounts.lock().await;
         *accounts_lock = Some(loaded_clients);
+    }
+
+    if args.sessions > 0 {
+        println!("Starting batch account creation: {} session(s) requested", args.sessions);
+        info!("Batch session creation started: {} session(s) requested", args.sessions);
+
+        for i in 1..=args.sessions {
+            println!("[{}/{}] Creating new client session...", i, args.sessions);
+            info!("Creating client session {}/{}", i, args.sessions);
+
+            if let Err(e) = create_client(&home_dir, &proxies, &global_state).await {
+                println!("[{}/{}] Failed to create client session: {e}", i, args.sessions);
+                error!("Failed to create client session {}/{}: {e}", i, args.sessions);
+            } else {
+                println!("[{}/{}] Client session created successfully", i, args.sessions);
+                info!("Client session {}/{} created successfully", i, args.sessions);
+            }
+        }
+
+        println!("Batch account creation finished: {} session(s) processed", args.sessions);
+        info!("Batch session creation finished: {} session(s) processed", args.sessions);
     }
 
     let games = config.loaded_games().await?;

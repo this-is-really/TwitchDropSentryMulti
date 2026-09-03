@@ -19,6 +19,7 @@ tracing-appender = "0.2.5"
 auto-launch = "0.6.0"
 rand = "0.10.2"
 chrono = "0.4.45"
+clap = { version = "4.6.6", features = ["derive"] }
 
 [profile.release]
 opt-level = 3
