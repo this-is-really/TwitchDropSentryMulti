@@ -322,9 +322,18 @@ async fn main_logic (client: Arc<TwitchClient> ,grouped: BTreeMap<usize, VecDequ
         let pending_drops_clone = pending_drops.clone();
         let global_state_clone = global_state.clone();
 
-        let mut rng = rng();
-        let mut rng = SmallRng::from_rng(&mut rng);
-        tokio::spawn(async move {
+        
+
+        spawn_supervised("campaign_refresh", Duration::from_secs(10), move || {
+            let client = client.clone();
+            let games_clone = games_clone.clone();
+            let global_state_clone = global_state_clone.clone();
+            let drop_campaigns = drop_campaigns.clone();
+            let pending_drops_clone = pending_drops_clone.clone();
+            
+            let mut rng = rng();
+            let mut rng = SmallRng::from_rng(&mut rng);
+            async move {
             loop {
                 let jitter = rng.random_range(15..=30);
                 sleep(Duration::from_secs(jitter * 60)).await;
@@ -406,6 +415,10 @@ async fn main_logic (client: Arc<TwitchClient> ,grouped: BTreeMap<usize, VecDequ
                 let mut pd_lock = pending_drops_clone.lock().await;
                 pd_lock.extend(new_pending);
             }
+            }
+        });
+        tokio::spawn(async move {
+            
         });
     }
 
@@ -433,8 +446,15 @@ async fn main_logic (client: Arc<TwitchClient> ,grouped: BTreeMap<usize, VecDequ
 async fn watch_sync (clients: Vec<Arc<TwitchClient>>, rx: tokio::sync::watch::Receiver<Option<Channel>>, notify: Arc<Notify>) {
     for client in clients {
         let notify = notify.clone();
-        let mut watch_rx = rx.clone();
-        tokio::spawn(async move {
+        let rx = rx.clone();
+        let login = client.login.clone().unwrap_or_default();
+
+        spawn_supervised(format!("watch_sync-{login}"), Duration::from_secs(5), move || {
+            let client = client.clone();
+            let notify = notify.clone();
+            let mut watch_rx = rx.clone();
+            
+            async move {
             let mut old_stream_name = String::new();
             let mut now_watching_stream: Option<(String, String, String)> = None;
             loop {
@@ -502,6 +522,7 @@ async fn watch_sync (clients: Vec<Arc<TwitchClient>>, rx: tokio::sync::watch::Re
                         };
                     }
                 }
+            }
             }
         });
     }
